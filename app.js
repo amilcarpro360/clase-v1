@@ -6,7 +6,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // --- 1. PEGA TU LINK DE MONGODB AQUÍ ---
-const MONGO_URI = "mongodb+srv://TU_USUARIO:TU_CONTRASEÑA@cluster0.jbyog90.mongodb.net/?appName=Cluster0";
+const MONGO_URI = "mongodb+srv://admin:clase1789@cluster0.jbyog90.mongodb.net/?appName=Cluster0";
 
 mongoose.connect(MONGO_URI).then(() => console.log("¡Conectado al mongolo!"));
 
@@ -180,3 +180,4 @@ app.get('/', async (req, res) => {
 });
 
 app.listen(PORT, () => console.log('Servidor corriendo en el puerto ' + PORT));
+
