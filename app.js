@@ -4,13 +4,13 @@ const mongoose = require('mongoose');
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const streamifier = require('streamifier');
-const webpush = require('web-push'); // Nueva librería para notificaciones
+const webpush = require('web-push');
+const path = require('path'); // Necesario para el sw.js
 const app = express();
 
 const PORT = process.env.PORT || 4000;
 
-// --- CONFIGURACIÓN NOTIFICACIONES (VAPID KEYS) ---
-// Estas llaves identifican tu servidor para que Google/Apple dejen enviar el aviso
+// --- CONFIGURACIÓN NOTIFICACIONES (VAPID) ---
 const vapidKeys = webpush.generateVAPIDKeys();
 webpush.setVapidDetails('mailto:admin@clase.com', vapidKeys.publicKey, vapidKeys.privateKey);
 
@@ -41,12 +41,25 @@ const User = mongoose.model('User', {
     color: { type: String, default: '#6c5ce7' },
     avatar: { type: String, default: '' },
     baneadoHasta: { type: Date, default: null },
-    suscripcionPush: Object // Aquí guardamos la llave del dispositivo del usuario
+    suscripcionPush: Object 
 });
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(session({ secret: 'secreto-clase-definitivo', resave: false, saveUninitialized: false }));
+
+// RUTA PARA EL SERVICE WORKER (Evita errores de notificaciones)
+app.get('/sw.js', (req, res) => {
+    res.send(`
+        self.addEventListener('push', e => {
+            const data = e.data.json();
+            self.registration.showNotification(data.title, {
+                body: data.body,
+                icon: 'https://cdn-icons-png.flaticon.com/512/3449/3449692.png'
+            });
+        });
+    `);
+});
 
 // --- MIDDLEWARES ---
 const checkBan = async (req, res, next) => {
@@ -63,14 +76,14 @@ const checkBan = async (req, res, next) => {
 app.post('/suscribirse', async (req, res) => {
     if (!req.session.u) return res.sendStatus(401);
     await User.findOneAndUpdate({ user: req.session.u }, { suscripcionPush: req.body });
-    res.status(201).json({});
+    return res.status(201).json({});
 });
 
 async function enviarNotificacionGlobal(titulo, cuerpo) {
     const usuarios = await User.find({ suscripcionPush: { $exists: true } });
     const payload = JSON.stringify({ title: titulo, body: cuerpo });
     usuarios.forEach(u => {
-        webpush.sendNotification(u.suscripcionPush, payload).catch(err => console.error("Error envío push", err));
+        webpush.sendNotification(u.suscripcionPush, payload).catch(err => console.log("Push fallido para un usuario"));
     });
 }
 
@@ -83,8 +96,12 @@ app.post('/auth', async (req, res) => {
         return res.send('Registrado. <a href="/">Entrar</a>');
     }
     const u = await User.findOne({ user, pass });
-    if (u) { req.session.u = u.user; req.session.rol = u.rol; res.redirect('/'); }
-    else res.send('Error.');
+    if (u) { 
+        req.session.u = u.user; 
+        req.session.rol = u.rol; 
+        return res.redirect('/'); 
+    }
+    return res.send('Error en login.');
 });
 
 app.post('/publicar', checkBan, upload.single('archivo'), async (req, res) => {
@@ -115,10 +132,8 @@ app.post('/publicar', checkBan, upload.single('archivo'), async (req, res) => {
         link: url, autor: req.session.u, timestamp: ahora.toLocaleString() 
     }).save();
 
-    // Enviar notificación al móvil de todos
-    enviarNotificacionGlobal(`Nueva ${req.body.tipo}`, `${req.session.u} ha publicado algo en ${req.body.asignatura}`);
-    
-    res.redirect('/');
+    enviarNotificacionGlobal(`Nueva ${req.body.tipo}`, `${req.session.u} ha publicado algo.`);
+    return res.redirect('/');
 });
 
 app.post('/banear/:id', async (req, res) => {
@@ -129,12 +144,20 @@ app.post('/banear/:id', async (req, res) => {
     else if (req.body.tiempo === 'perm') fecha.setFullYear(fecha.getFullYear() + 99);
     else fecha = null;
     await User.findByIdAndUpdate(req.params.id, { baneadoHasta: fecha });
-    res.redirect('/');
+    return res.redirect('/');
 });
 
 app.post('/borrar-cuenta/:id', async (req, res) => {
     if (req.session.rol === 'admin') await User.findByIdAndDelete(req.params.id);
-    res.redirect('/');
+    return res.redirect('/');
+});
+
+app.post('/reaccionar/:id', async (req, res) => {
+    const post = await Item.findById(req.params.id);
+    if (!post.reacciones.includes(req.session.u)) {
+        await Item.findByIdAndUpdate(req.params.id, { $push: { reacciones: req.session.u } });
+    }
+    return res.redirect('/');
 });
 
 app.get('/salir', (req, res) => { req.session.destroy(); res.redirect('/'); });
@@ -149,9 +172,9 @@ app.get('/', async (req, res) => {
             </div>
             <form action="/auth" method="POST" style="background:white; padding:30px; border-radius:20px; width:280px; text-align:center;">
                 <h2>🎓 Login</h2>
-                <input name="user" placeholder="Usuario" required style="width:100%; padding:10px; margin-bottom:10px;">
-                <input name="pass" type="password" placeholder="Pass" required style="width:100%; padding:10px; margin-bottom:10px;">
-                <button name="accion" value="login" style="width:100%; background:#6c5ce7; color:white; padding:10px; border:none; border-radius:5px;">Entrar</button>
+                <input name="user" placeholder="Usuario" required style="width:100%; padding:10px; margin-bottom:10px; border-radius:5px; border:1px solid #ddd;">
+                <input name="pass" type="password" placeholder="Contraseña" required style="width:100%; padding:10px; margin-bottom:10px; border-radius:5px; border:1px solid #ddd;">
+                <button name="accion" value="login" style="width:100%; background:#6c5ce7; color:white; padding:10px; border:none; border-radius:5px; cursor:pointer;">Entrar</button>
             </form>
             <script>setTimeout(() => document.getElementById('splash').style.display='none', 1500);</script>
         </body>`);
@@ -170,17 +193,17 @@ app.get('/', async (req, res) => {
             <style>
                 body { font-family:sans-serif; background:#f0f2f5; margin:0; }
                 nav { background:${color}; color:white; padding:15px; display:flex; justify-content:space-between; }
-                .tabs { display:flex; background:white; position:sticky; top:0; }
+                .tabs { display:flex; background:white; position:sticky; top:0; z-index:10; }
                 .tab { flex:1; text-align:center; padding:15px; cursor:pointer; }
-                .tab.active { border-bottom:3px solid ${color}; color:${color}; }
+                .tab.active { border-bottom:3px solid ${color}; color:${color}; font-weight:bold; }
                 .container { max-width:500px; margin:20px auto; padding:10px; }
                 .section { display:none; } .section.active { display:block; }
                 .user-card { background:white; padding:10px; margin-bottom:5px; border-radius:10px; display:flex; align-items:center; gap:10px; }
-                button { cursor:pointer; }
+                input, select, button { border-radius:8px; border:1px solid #ddd; padding:10px; margin-bottom:10px; width:100%; }
             </style>
         </head>
         <body>
-            <nav><b>🎓 ${req.session.u}</b> <a href="/salir" style="color:white; font-size:0.8em;">Salir</a></nav>
+            <nav><b>🎓 ${req.session.u}</b> <a href="/salir" style="color:white; text-decoration:none; font-size:0.8em;">Salir</a></nav>
             <div class="tabs">
                 <div class="tab active" onclick="ver('apuntes', this)">📂</div>
                 <div class="tab" onclick="ver('dudas', this)">❓</div>
@@ -190,42 +213,51 @@ app.get('/', async (req, res) => {
             
             <div class="container">
                 <div id="sec-apuntes" class="section active">
+                    <form action="/publicar" method="POST" enctype="multipart/form-data" style="background:white; padding:15px; border-radius:15px;">
+                        <input type="hidden" name="tipo" value="apunte"><input name="titulo" placeholder="Título..." required>
+                        <input type="file" name="archivo" required><button style="background:${color}; color:white;">Publicar</button>
+                    </form>
                     ${todos.filter(i=>i.tipo==='apunte').reverse().map(i=>`<div style="background:white; padding:15px; border-radius:10px; margin-bottom:10px; border-left:5px solid ${color};"><b>${i.titulo}</b><br><small>${i.autor}</small></div>`).join('')}
                 </div>
 
                 <div id="sec-dudas" class="section">
                     <form action="/publicar" method="POST" enctype="multipart/form-data" style="background:white; padding:15px; border-radius:10px; margin-bottom:15px;">
-                        <input type="hidden" name="tipo" value="duda">
-                        <textarea name="titulo" placeholder="Tu duda..." style="width:100%; border:1px solid #ddd;" required></textarea>
+                        <input type="hidden" name="tipo" value="duda"><textarea name="titulo" placeholder="Tu duda..." required></textarea>
                         <input type="file" name="archivo" accept="image/*">
-                        <button style="background:#00b894; color:white; width:100%; padding:10px; border:none; margin-top:5px;">Lanzar Duda</button>
+                        <button style="background:#00b894; color:white;">Lanzar Duda</button>
                     </form>
                     ${todos.filter(i=>i.tipo==='duda').reverse().map(i=>`
                         <div style="background:white; padding:15px; border-radius:10px; margin-bottom:10px;">
                             <b>${i.autor}:</b> ${i.titulo}<br>
                             ${i.link ? `<img src="${i.link}" style="width:100%; border-radius:10px; margin-top:10px;">` : ''}
+                            <form action="/reaccionar/${i._id}" method="POST" style="margin-top:5px;">
+                                <button style="width:auto; padding:5px 10px; background:#eee; color:#333; border:none; font-size:0.8em;">💡 Útil (${i.reacciones.length})</button>
+                            </form>
                         </div>
                     `).join('')}
                 </div>
 
                 <div id="sec-perfil" class="section">
-                    <div style="background:white; padding:20px; border-radius:10px;">
-                        <button onclick="activarNotificaciones()" style="background:#ff7675; color:white; border:none; padding:10px; width:100%; border-radius:5px;">🔔 Activar Notificaciones en este móvil</button>
+                    <div style="background:white; padding:20px; border-radius:10px; text-align:center;">
+                        <img src="${userLog.avatar || 'https://via.placeholder.com/100'}" width="100" style="border-radius:50%; margin-bottom:10px;">
+                        <button onclick="activarNotificaciones()" style="background:#ff7675; color:white; border:none; padding:10px; font-weight:bold;">🔔 Activar Notificaciones Push</button>
                     </div>
                 </div>
 
                 <div id="sec-admin" class="section">
-                    <h3>Control Alumnos</h3>
+                    <h3>Panel de Control</h3>
                     ${todosUsuarios.map(u => `
                         <div class="user-card">
                             <img src="${u.avatar || 'https://via.placeholder.com/50'}" width="40" height="40" style="border-radius:50%;">
                             <div style="flex:1;"><b>${u.user}</b></div>
-                            <form action="/banear/${u._id}" method="POST" style="margin:0; display:flex; gap:2px;">
-                                <select name="tiempo" onchange="this.form.submit()" style="font-size:0.6em;">
-                                    <option>Ban...</option><option value="2d">2d</option><option value="1w">1s</option><option value="perm">X</option><option value="unban">OK</option>
+                            <form action="/banear/${u._id}" method="POST" style="margin:0; width:80px;">
+                                <select name="tiempo" onchange="this.form.submit()" style="font-size:0.7em; padding:5px;">
+                                    <option>Baneo...</option><option value="2d">2 Días</option><option value="1w">1 Semana</option><option value="perm">Perm</option><option value="unban">Quitar</option>
                                 </select>
                             </form>
-                            <form action="/borrar-cuenta/${u._id}" method="POST" style="margin:0;"><button style="background:red; color:white; border:none;">🗑️</button></form>
+                            <form action="/borrar-cuenta/${u._id}" method="POST" style="margin:0; width:40px;">
+                                <button style="background:red; color:white; border:none; padding:5px;">🗑️</button>
+                            </form>
                         </div>
                     `).join('')}
                 </div>
@@ -239,8 +271,8 @@ app.get('/', async (req, res) => {
                     el.classList.add('active');
                 }
 
-                // LÓGICA DE NOTIFICACIONES PUSH
                 async function activarNotificaciones() {
+                    if (!('serviceWorker' in navigator)) return alert('Tu navegador no soporta esto');
                     const permission = await Notification.requestPermission();
                     if (permission === 'granted') {
                         const registration = await navigator.serviceWorker.register('/sw.js');
@@ -253,7 +285,7 @@ app.get('/', async (req, res) => {
                             body: JSON.stringify(subscription),
                             headers: { 'Content-Type': 'application/json' }
                         });
-                        alert('✅ ¡Notificaciones activadas!');
+                        alert('✅ ¡Activado!');
                     }
                 }
             </script>
@@ -261,4 +293,4 @@ app.get('/', async (req, res) => {
         </html>`);
 });
 
-app.listen(PORT, () => console.log('Servidor en puerto ' + PORT));
+app.listen(PORT, () => console.log('Aula Virtual online en puerto ' + PORT));
