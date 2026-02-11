@@ -1,6 +1,7 @@
 {
-  "name": "aula-clase-koyeb",
+  "name": "aula-virtual-pro",
   "version": "1.0.0",
+  "description": "Aula Virtual con Notificaciones y Control Admin",
   "main": "app.js",
   "scripts": {
     "start": "node app.js"
