@@ -1,6 +1,7 @@
 {
-  "name": "aula-virtual",
+  "name": "aula-virtual-clase",
   "version": "1.0.0",
+  "description": "Plataforma escolar con dudas, imágenes y notificaciones",
   "main": "app.js",
   "scripts": {
     "start": "node app.js"
@@ -8,9 +9,16 @@
   "dependencies": {
     "express": "^4.18.2",
     "express-session": "^1.17.3",
-    "mongoose": "^8.0.0",
-    "cloudinary": "^1.41.0",
+    "mongoose": "^7.0.0",
+    "cloudinary": "^1.35.0",
     "multer": "^1.4.5-lts.1",
-    "streamifier": "^0.1.1"
-  }
+    "streamifier": "^0.1.1",
+    "web-push": "^3.6.6",
+    "path": "^0.12.7"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "author": "",
+  "license": "ISC"
 }
