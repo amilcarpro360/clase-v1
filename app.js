@@ -4,215 +4,145 @@ const mongoose = require('mongoose');
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const streamifier = require('streamifier');
-const webpush = require('web-push');
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 10000; // Render usa el 10000 por defecto
 
-// ==========================================
-// 1. CONFIGURACIÓN DE APIS Y SERVICIOS
-// ==========================================
+// 1. CONFIGURACIÓN
 cloudinary.config({ 
-    cloud_name: 'dvlbsl16g', 
-    api_key: '721617469253873', 
-    api_secret: 'IkWS7Rx0vD8ktW62IdWmlbhNTPk' 
+    cloud_name: 'dvlbsl16g', api_key: '721617469253873', api_secret: 'IkWS7Rx0vD8ktW62IdWmlbhNTPk' 
 });
-
 const upload = multer();
 
-// ==========================================
-// 2. MODELOS DE BASE DE DATOS (MongoDB)
-// ==========================================
 mongoose.connect('mongodb+srv://admin:clase1789@cluster0.jbyog90.mongodb.net/?appName=Cluster0');
 
 const User = mongoose.model('User', { 
-    user: String, 
-    pass: String, 
-    rol: { type: String, default: 'estudiante' },
-    baneadoHasta: { type: Date, default: null },
-    reaccionesHoy: { type: Map, of: String, default: {} } 
+    user: String, pass: String, rol: String, 
+    baneadoHasta: Date,
+    historialReacciones: { type: Map, of: String, default: {} } 
 });
+const Post = mongoose.model('Post', { titulo: String, imagen: String, autor: String, likes: { type: Number, default: 0 }, fecha: { type: Date, default: Date.now } });
+const Config = mongoose.model('Config', { logoUrl: String });
 
-const Post = mongoose.model('Post', { 
-    titulo: String, 
-    imagenUrl: String, 
-    autor: String, 
-    fecha: { type: Date, default: Date.now },
-    likes: { type: Number, default: 0 }
-});
-
-const GlobalConfig = mongoose.model('GlobalConfig', { logoUrl: String });
-
-// Middlewares
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(session({ secret: 'secreto-clase-2026', resave: false, saveUninitialized: false }));
+app.use(session({ secret: 'render-secret-key', resave: false, saveUninitialized: false }));
 
-// ==========================================
-// 3. LÓGICA DE LAS 8 PETICIONES
-// ==========================================
-
-// PETICIÓN 8: Control Horario (Viernes 18h a Lunes 08h)
-const middlewareHorario = (req, res, next) => {
+// --- PETICIÓN 8: HORARIO (Vie 18h a Lun 08h) ---
+app.use((req, res, next) => {
     const ahora = new Date();
     const dia = ahora.getDay(); 
     const hora = ahora.getHours();
+    const bloqueo = (dia === 5 && hora >= 18) || (dia === 6) || (dia === 0) || (dia === 1 && hora < 8);
     
-    // Bloqueo: Viernes(5) tarde, Sábado(6), Domingo(0), Lunes(1) mañana
-    const cerrado = (dia === 5 && hora >= 18) || (dia === 6) || (dia === 0) || (dia === 1 && hora < 8);
-    
-    if (cerrado && req.path === '/publicar' && req.method === 'POST') {
-        return res.status(403).send("<h1>🔒 Horario Cerrado</h1><p>El aula abre los lunes a las 8:00 AM.</p>");
+    if (bloqueo && req.path === '/publicar' && req.method === 'POST') {
+        return res.send("<h1>🔒 Sistema cerrado por fin de semana</h1>");
     }
     next();
-};
+});
 
-app.use(middlewareHorario);
-
-// PETICIÓN 1, 2 y 4: Publicar con Foto y Notificar
+// --- PETICIÓN 1, 2 y 4: SUBIR Y NOTIFICAR ---
 app.post('/publicar', upload.single('archivo'), async (req, res) => {
     if (!req.session.u) return res.redirect('/');
-    
-    let img = "";
+    let img = '';
     if (req.file) {
-        const result = await new Promise((resolve) => {
-            const stream = cloudinary.uploader.upload_stream({ folder: 'aula' }, (err, res) => resolve(res));
-            streamifier.createReadStream(req.file.buffer).pipe(stream);
+        const r = await new Promise((res) => {
+            const s = cloudinary.uploader.upload_stream({ folder: 'render_clase' }, (err, result) => res(result));
+            streamifier.createReadStream(req.file.buffer).pipe(s);
         });
-        img = result.secure_url;
+        img = r.secure_url;
     }
-
-    await new Post({ titulo: req.body.titulo, imagenUrl: img, autor: req.session.u }).save();
-    console.log("📢 Notificación enviada a la clase"); // Simulación de Notificación
+    await new Post({ titulo: req.body.titulo, imagen: img, autor: req.session.u }).save();
+    console.log("🔔 Notificación: Nuevo post en Render");
     res.redirect('/');
 });
 
-// PETICIÓN 5: Reacción Limitada (1 al día por post)
+// --- PETICIÓN 5: REACCIÓN 1 VEZ AL DÍA ---
 app.post('/like/:id', async (req, res) => {
-    const user = await User.findOne({ user: req.session.u });
+    const u = await User.findOne({ user: req.session.u });
     const hoy = new Date().toDateString();
-    
-    if (user.reaccionesHoy.get(req.params.id) === hoy) {
-        return res.send("<script>alert('Ya reaccionaste hoy a esto'); window.location='/';</script>");
+    if (u.historialReacciones.get(req.params.id) === hoy) {
+        return res.send("<script>alert('Ya votaste hoy'); window.location='/';</script>");
     }
-
     await Post.findByIdAndUpdate(req.params.id, { $inc: { likes: 1 } });
-    user.reaccionesHoy.set(req.params.id, hoy);
-    await user.save();
+    u.historialReacciones.set(req.params.id, hoy);
+    await u.save();
     res.redirect('/');
 });
 
-// PETICIÓN 3, 6 y 7: Panel Admin (Logo, Borrar y Banear)
-app.post('/admin/action', async (req, res) => {
+// --- PETICIÓN 3, 6 y 7: ADMIN ---
+app.post('/admin', async (req, res) => {
     if (req.session.rol !== 'admin') return res.redirect('/');
-
-    const { accion, targetId, extra } = req.body;
-
-    if (accion === 'cambiarLogo') {
-        await GlobalConfig.findOneAndUpdate({}, { logoUrl: extra }, { upsert: true });
-    } else if (accion === 'banear') {
-        let fin = new Date();
-        fin.setHours(fin.getHours() + parseInt(extra));
-        await User.findByIdAndUpdate(targetId, { baneadoHasta: fin });
-    } else if (accion === 'eliminar') {
-        await User.findByIdAndDelete(targetId);
+    const { accion, id, val } = req.body;
+    if (accion === 'logo') await Config.findOneAndUpdate({}, { logoUrl: val }, { upsert: true });
+    if (accion === 'ban') {
+        let d = new Date(); d.setHours(d.getHours() + parseInt(val));
+        await User.findByIdAndUpdate(id, { baneadoHasta: d });
     }
+    if (accion === 'del') await User.findByIdAndDelete(id);
     res.redirect('/');
 });
 
-// ==========================================
-// 4. RUTAS DE VISTA (Interfaz)
-// ==========================================
-
+// --- VISTA Y LOGIN ---
 app.get('/', async (req, res) => {
-    const config = await GlobalConfig.findOne() || { logoUrl: 'https://cdn-icons-png.flaticon.com/512/3449/3449692.png' };
-    
-    if (!req.session.u) {
-        return res.send(`
-            <body style="font-family:sans-serif; text-align:center; background:#f4f4f4;">
-                <img src="${config.logoUrl}" width="120">
-                <h2>Acceso Aula Virtual</h2>
-                <form action="/login" method="POST" style="display:inline-block; background:white; padding:20px; border-radius:10px;">
-                    <input name="user" placeholder="Usuario" required><br><br>
-                    <input name="pass" type="password" placeholder="Clave" required><br><br>
-                    <input name="pin" placeholder="PIN Admin (opcional)"><br><br>
-                    <button name="tipo" value="in">Entrar</button>
-                    <button name="tipo" value="reg">Registrarse</button>
-                </form>
-            </body>
-        `);
-    }
+    const c = await Config.findOne() || { logoUrl: 'https://cdn-icons-png.flaticon.com/512/3449/3449692.png' };
+    if (!req.session.u) return res.send(`
+        <body style="text-align:center; font-family:sans-serif; background:#f0f0f0; padding-top:50px;">
+            <img src="${c.logoUrl}" width="80">
+            <h2>Aula Virtual (Render)</h2>
+            <form action="/auth" method="POST">
+                <input name="user" placeholder="Usuario"><br>
+                <input name="pass" type="password" placeholder="Pass"><br>
+                <input name="pin" placeholder="PIN Admin"><br>
+                <button name="m" value="in">Entrar</button> <button name="m" value="reg">Registrar</button>
+            </form>
+        </body>`);
 
     const posts = await Post.find().sort({ fecha: -1 });
-    const usuarios = req.session.rol === 'admin' ? await User.find() : [];
-
+    const users = req.session.rol === 'admin' ? await User.find() : [];
     res.send(`
-        <body style="font-family:sans-serif; margin:0; background:#eee;">
-            <nav style="background:#2c3e50; color:white; padding:15px; display:flex; justify-content:space-between;">
-                <span><img src="${config.logoUrl}" width="30"> Bienvenido, ${req.session.u}</span>
-                <a href="/logout" style="color:white;">Salir</a>
+        <body style="font-family:sans-serif; margin:0; background:#fafafa;">
+            <nav style="background:#000; color:white; padding:15px; display:flex; justify-content:space-between;">
+                <span><img src="${c.logoUrl}" width="25"> <b>${req.session.u}</b></span>
+                <a href="/salir" style="color:white;">Cerrar Sesión</a>
             </nav>
-            <div style="max-width:800px; margin:20px auto;">
-                <form action="/publicar" method="POST" enctype="multipart/form-data" style="background:white; padding:20px; border-radius:10px;">
-                    <textarea name="titulo" placeholder="Escribe tu duda..." style="width:100%;" required></textarea><br>
+            <div style="max-width:600px; margin:auto; padding:20px;">
+                <form action="/publicar" method="POST" enctype="multipart/form-data" style="background:white; padding:15px; border-radius:8px; border:1px solid #ddd;">
+                    <textarea name="titulo" style="width:100%" placeholder="Escribe tu duda..."></textarea><br><br>
                     <input type="file" name="archivo"><br><br>
-                    <button style="width:100%; background:#27ae60; color:white; border:none; padding:10px;">Publicar Dudas</button>
+                    <button style="background:#000; color:white; border:none; padding:10px 20px; border-radius:5px;">Publicar</button>
                 </form>
-
                 ${posts.map(p => `
-                    <div style="background:white; padding:15px; margin-top:15px; border-radius:10px;">
+                    <div style="background:white; padding:15px; margin-top:15px; border-radius:8px; border:1px solid #ddd;">
                         <b>${p.autor}</b> <small>${p.fecha.toLocaleString()}</small>
                         <p>${p.titulo}</p>
-                        ${p.imagenUrl ? `<img src="${p.imagenUrl}" style="width:100%;">` : ''}
-                        <form action="/like/${p._id}" method="POST">
-                            <button>💡 Es útil (${p.likes})</button>
+                        ${p.imagen ? `<img src="${p.imagen}" style="width:100%; border-radius:5px;">`:''}
+                        <form action="/like/${p._id}" method="POST" style="margin-top:10px;">
+                            <button style="background:#eee; border:none; padding:5px 10px; border-radius:15px; cursor:pointer;">💡 Útil (${p.likes})</button>
                         </form>
-                    </div>
-                `).join('')}
-
+                    </div>`).join('')}
                 ${req.session.rol === 'admin' ? `
-                    <div style="background:#34495e; color:white; padding:20px; margin-top:40px; border-radius:10px;">
-                        <h3>🛠️ Configuración de Administrador</h3>
-                        <form action="/admin/action" method="POST">
-                            <input name="extra" placeholder="URL del nuevo logo">
-                            <button name="accion" value="cambiarLogo">Actualizar Logo</button>
-                        </form>
+                    <div style="background:#f9f9f9; padding:20px; border:2px dashed #ccc; margin-top:40px;">
+                        <h3>Panel Administrador</h3>
+                        <form action="/admin" method="POST"><input name="val" placeholder="URL Logo"><button name="accion" value="logo">Cambiar Logo</button></form>
                         <hr>
-                        <h4>Usuarios en el sistema:</h4>
-                        ${usuarios.map(u => `
-                            <div style="margin-bottom:10px;">
-                                ${u.user} (${u.rol})
-                                <form action="/admin/action" method="POST" style="display:inline;">
-                                    <input type="hidden" name="targetId" value="${u._id}">
-                                    <input name="extra" placeholder="Horas Ban" style="width:60px;">
-                                    <button name="accion" value="banear">Ban</button>
-                                    <button name="accion" value="eliminar" style="color:red;">X</button>
-                                </form>
-                            </div>
-                        `).join('')}
-                    </div>
-                ` : ''}
+                        ${users.map(u => `<div>${u.user} <form action="/admin" method="POST" style="display:inline;"><input type="hidden" name="id" value="${u._id}"><input name="val" placeholder="H" style="width:30px;"><button name="accion" value="ban">Ban</button><button name="accion" value="del">X</button></form></div>`).join('')}
+                    </div>` : ''}
             </div>
-        </body>
-    `);
+        </body>`);
 });
 
-// Autenticación básica
-app.post('/login', async (req, res) => {
-    const { user, pass, pin, tipo } = req.body;
-    if (tipo === 'reg') {
-        const rol = (pin === '2845') ? 'admin' : 'estudiante';
-        await new User({ user, pass, rol }).save();
-        return res.send("Registrado. <a href='/'>Volver</a>");
+app.post('/auth', async (req, res) => {
+    const { user, pass, pin, m } = req.body;
+    if (m === 'reg') {
+        await new User({ user, pass, rol: (pin === '2845' ? 'admin' : 'estudiante') }).save();
+        return res.send("Registrado. <a href='/'>Login</a>");
     }
     const u = await User.findOne({ user, pass });
     if (u && (!u.baneadoHasta || u.baneadoHasta < new Date())) {
         req.session.u = u.user; req.session.rol = u.rol; res.redirect('/');
-    } else {
-        res.send("Baneado o datos mal. <a href='/'>Volver</a>");
-    }
+    } else res.send("Error de acceso.");
 });
 
-app.get('/logout', (req, res) => { req.session.destroy(); res.redirect('/'); });
-
-app.listen(PORT, '0.0.0.0', () => console.log('Aula Virtual Activa en ' + PORT));
+app.get('/salir', (req, res) => { req.session.destroy(); res.redirect('/'); });
+app.listen(PORT, () => console.log('Render listo'));
