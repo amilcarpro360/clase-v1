@@ -23,7 +23,8 @@ mongoose.connect('mongodb+srv://admin:clase1789@cluster0.jbyog90.mongodb.net/?ap
 // 3. MODELOS
 const User = mongoose.model('User', { 
     user: String, pass: String, rol: String, baneadoHasta: Date, foto: String,
-    historialLikes: { type: Map, of: String, default: {} } 
+    historialLikes: { type: Map, of: String, default: {} },
+    fcmToken: String // <-- Añadido para guardar el permiso de notis
 });
 
 const Post = mongoose.model('Post', { 
@@ -40,9 +41,17 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(session({ secret: 'aula-ultra-secret', resave: false, saveUninitialized: false }));
 
-// --- RUTAS DE ACCIÓN ---
+// --- NUEVA RUTA PARA GUARDAR EL TOKEN ---
+app.post('/save-token', async (req, res) => {
+    if (req.session.u) {
+        await User.findOneAndUpdate({ user: req.session.u }, { fcmToken: req.body.token });
+        res.json({ ok: true });
+    } else {
+        res.status(401).send("No logueado");
+    }
+});
 
-// Comentar (LA QUE FALTABA)
+// Comentar
 app.post('/comentar/:id', async (req, res) => {
     if (!req.session.u) return res.redirect('/');
     await Post.findByIdAndUpdate(req.params.id, { 
@@ -81,33 +90,6 @@ app.post('/eliminar/:id', async (req, res) => {
     res.redirect('/');
 });
 
-app.post('/admin/user-cmd', async (req, res) => {
-    if (req.session.rol !== 'admin') return res.redirect('/');
-    const { accion, id, val } = req.body;
-    if (accion === 'ban') {
-        let d = new Date(); d.setHours(d.getHours() + parseInt(val));
-        await User.findByIdAndUpdate(id, { baneadoHasta: d });
-    }
-    if (accion === 'del') await User.findByIdAndDelete(id);
-    if (accion === 'makeAdmin') await User.findByIdAndUpdate(id, { rol: 'admin' });
-    res.redirect('/');
-});
-
-app.post('/config-sistema', upload.single('splashFile'), async (req, res) => {
-    if (req.session.rol !== 'admin') return res.redirect('/');
-    if (req.file) {
-        const r = await new Promise((rs) => {
-            const s = cloudinary.uploader.upload_stream({ folder: 'sistema' }, (err, resu) => rs(resu));
-            streamifier.createReadStream(req.file.buffer).pipe(s);
-        });
-        await Config.findOneAndUpdate({}, { splashImgUrl: r.secure_url }, { upsert: true });
-    }
-    if (req.body.logoIconUrl) {
-        await Config.findOneAndUpdate({}, { logoIconUrl: req.body.logoIconUrl }, { upsert: true });
-    }
-    res.redirect('/');
-});
-
 // --- INTERFAZ ---
 app.get('/', async (req, res) => {
     const conf = await Config.findOne() || { 
@@ -130,7 +112,7 @@ app.get('/', async (req, res) => {
             body { margin:0; font-family:'Outfit',sans-serif; background:var(--bg); }
             #splash { position:fixed; inset:0; background:white; z-index:9999; display:flex; flex-direction:column; justify-content:center; align-items:center; transition:0.8s; }
             .hide-splash { opacity:0; pointer-events:none; transform: scale(1.1); }
-            .nav { background: white; padding: 12px 5%; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #e2e8f0; sticky; top:0; z-index:100; }
+            .nav { background: white; padding: 12px 5%; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #e2e8f0; position:sticky; top:0; z-index:100; }
             .avatar { width:35px; height:35px; border-radius:50%; object-fit:cover; background:#eee; }
             .tabs { display:flex; gap:8px; padding:15px; overflow-x:auto; max-width:900px; margin:0 auto; }
             .tab-btn { padding:12px 20px; border:none; border-radius:15px; background:white; cursor:pointer; font-weight:600; color:#64748b; white-space:nowrap; }
@@ -209,11 +191,6 @@ app.get('/', async (req, res) => {
                         <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px; background:#f8fafc; padding:10px; border-radius:15px;">
                             <img src="${u.foto || 'https://via.placeholder.com/150'}" class="avatar">
                             <div style="flex:1"><b>${u.user}</b> <small>(${u.rol})</small></div>
-                            <form action="/admin/user-cmd" method="POST" style="display:flex; gap:3px;">
-                                <input type="hidden" name="id" value="${u._id}">
-                                ${u.rol !== 'admin' ? '<button name="accion" value="makeAdmin" style="background:#4f46e5; color:white; border:none; border-radius:5px; padding:5px;">Admin</button>' : ''}
-                                <button name="accion" value="del" style="background:#ef4444; color:white; border:none; border-radius:5px; padding:5px;">X</button>
-                            </form>
                         </div>
                     `).join('')}
                 </div>
@@ -222,26 +199,58 @@ app.get('/', async (req, res) => {
             <div id="t5" class="section" style="display:none">
                 <div class="card">
                     <h3>Ajustes</h3>
+                    <button class="btn-p" onclick="pedirPermisoNotis()" style="background:#10b981; margin-bottom:15px;">🔔 Activar Notificaciones</button>
                     <form action="/perfil" method="POST" enctype="multipart/form-data">
                         <p>Foto Perfil:</p><input type="file" name="foto" accept="image/*"><button class="btn-p">Guardar</button>
                     </form>
-                    ${req.session.rol === 'admin' ? `
-                    <hr><form action="/config-sistema" method="POST" enctype="multipart/form-data">
-                        <p>URL Icono Pestaña:</p><input name="logoIconUrl" value="${conf.logoIconUrl}">
-                        <p>Archivo Splash:</p><input type="file" name="splashFile" accept="image/*"><button class="btn-p">Actualizar Aula</button>
-                    </form>` : ''}
                 </div>
             </div>
-        </div>`;
+        </div>
+
+        <script type="module">
+            import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+            import { getMessaging, getToken, onMessage } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-messaging.js";
+
+            const firebaseConfig = {
+                apiKey: "AIzaSyCjv9izSETcQqL6Ad0sN8LDAX81FabWmvY",
+                authDomain: "aulavirtual1of.firebaseapp.com",
+                projectId: "aulavirtual1of",
+                storageBucket: "aulavirtual1of.firebasestorage.app",
+                messagingSenderId: "397072596716",
+                appId: "1:397072596716:web:c04730aedbcc3e9fc42fc9"
+            };
+
+            const app = initializeApp(firebaseConfig);
+            const messaging = getMessaging(app);
+
+            window.pedirPermisoNotis = async () => {
+                const permission = await Notification.requestPermission();
+                if (permission === 'granted') {
+                    const token = await getToken(messaging, { vapidKey: 'TU_VAPID_KEY_AQUI' });
+                    if (token) {
+                        await fetch('/save-token', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ token })
+                        });
+                        alert("¡Notificaciones activadas!");
+                    }
+                }
+            };
+
+            onMessage(messaging, (payload) => {
+                new Notification(payload.notification.title, { body: payload.notification.body });
+            });
+        </script>
+        `;
     }
 
     html += `<script>function tab(id){document.querySelectorAll('.section').forEach(s=>s.style.display='none');document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));document.getElementById(id).style.display='block';event.target.classList.add('active');}</script></body></html>`;
     res.send(html);
 });
 
-// AUTH & RESTO DE RUTAS IGUAL QUE ANTES...
 app.post('/auth', async (req, res) => {
-    const { user, pass, pin, m } = req.body;
+    const { user, pass, pin } = req.body;
     let u = await User.findOne({ user, pass });
     if (!u) {
         const rol = (pin === '2845') ? 'admin' : 'estudiante';
@@ -267,4 +276,4 @@ app.post('/perfil', upload.single('foto'), async (req, res) => {
 
 app.get('/salir', (req, res) => { req.session.destroy(); res.redirect('/'); });
 
-app.listen(PORT, () => console.log('🚀 Aula Virtual con Comentarios lista'));
+app.listen(PORT, () => console.log('🚀 Aula Virtual con Notificaciones lista'));
