@@ -24,7 +24,7 @@ mongoose.connect('mongodb+srv://admin:clase1789@cluster0.jbyog90.mongodb.net/?ap
 const User = mongoose.model('User', { 
     user: String, pass: String, rol: String, baneadoHasta: Date, foto: String,
     historialLikes: { type: Map, of: String, default: {} },
-    fcmToken: String // <-- Añadido para guardar el permiso de notis
+    fcmToken: String 
 });
 
 const Post = mongoose.model('Post', { 
@@ -41,14 +41,36 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(session({ secret: 'aula-ultra-secret', resave: false, saveUninitialized: false }));
 
-// --- NUEVA RUTA PARA GUARDAR EL TOKEN ---
+// --- RUTA CRÍTICA PARA EL SERVICE WORKER (Para que funcione en Render) ---
+app.get('/firebase-messaging-sw.js', (req, res) => {
+    res.setHeader('Content-Type', 'application/javascript');
+    res.send(`
+        importScripts('https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js');
+        importScripts('https://www.gstatic.com/firebasejs/10.7.1/firebase-messaging-compat.js');
+
+        firebase.initializeApp({
+            apiKey: "AIzaSyCjv9izSETcQqL6Ad0sN8LDAX81FabWmvY",
+            projectId: "aulavirtual1of",
+            messagingSenderId: "397072596716",
+            appId: "1:397072596716:web:c04730aedbcc3e9fc42fc9"
+        });
+
+        const messaging = firebase.messaging();
+        messaging.onBackgroundMessage((payload) => {
+            self.registration.showNotification(payload.notification.title, {
+                body: payload.notification.body,
+                icon: payload.notification.icon || 'https://cdn-icons-png.flaticon.com/512/3449/3449692.png'
+            });
+        });
+    `);
+});
+
+// Ruta para guardar el token en la DB
 app.post('/save-token', async (req, res) => {
     if (req.session.u) {
         await User.findOneAndUpdate({ user: req.session.u }, { fcmToken: req.body.token });
         res.json({ ok: true });
-    } else {
-        res.status(401).send("No logueado");
-    }
+    } else { res.sendStatus(401); }
 });
 
 // Comentar
@@ -60,10 +82,10 @@ app.post('/comentar/:id', async (req, res) => {
     res.redirect('/');
 });
 
+// Publicar
 app.post('/publicar', upload.single('archivo'), async (req, res) => {
     let mediaUrl = '';
     let isVideo = req.file && req.file.mimetype.startsWith('video/');
-    
     if (req.file) {
         const r = await new Promise((rs) => {
             const options = isVideo ? { resource_type: "video", folder: 'aula' } : { folder: 'aula' };
@@ -72,7 +94,6 @@ app.post('/publicar', upload.single('archivo'), async (req, res) => {
         });
         mediaUrl = r.secure_url;
     }
-
     await new Post({ 
         tipo: req.body.tipo, titulo: req.body.titulo, 
         imagen: isVideo ? '' : mediaUrl, video: isVideo ? mediaUrl : '',
@@ -82,6 +103,7 @@ app.post('/publicar', upload.single('archivo'), async (req, res) => {
     res.redirect('/');
 });
 
+// Eliminar
 app.post('/eliminar/:id', async (req, res) => {
     const p = await Post.findById(req.params.id);
     if (req.session.rol === 'admin' || (p && p.autor === req.session.u)) {
@@ -158,7 +180,6 @@ app.get('/', async (req, res) => {
                             <input type="hidden" name="tipo" value="${tipo}">
                             <textarea name="titulo" placeholder="¿Qué compartes?" required></textarea>
                             ${tipo === 'fechas' ? '<input type="date" name="fechaPost" required>' : ''}
-                            ${tipo === 'apuntes' ? '<input name="urlExtra" placeholder="Link externo">' : ''}
                             <input type="file" name="archivo" accept="image/*,video/*">
                             <button class="btn-p">Publicar</button>
                         </form>
@@ -170,36 +191,19 @@ app.get('/', async (req, res) => {
                             <p>${p.titulo}</p>
                             ${p.imagen ? `<img src="${p.imagen}" class="post-media">` : ''}
                             ${p.video ? `<video src="${p.video}" controls class="post-media"></video>` : ''}
-                            ${p.urlExtra ? `<a href="${p.urlExtra}" target="_blank">🔗 Ver enlace</a>` : ''}
-                            
-                            <div style="margin-top:15px; border-top:1px solid #eee; padding-top:10px;">
-                                ${p.comentarios.map(c => `<div class="comment-box"><b>${c.autor}:</b> ${c.texto}</div>`).join('')}
-                                <form action="/comentar/${p._id}" method="POST" style="display:flex; gap:5px; margin-top:10px;">
-                                    <input name="texto" placeholder="Escribe un comentario..." required style="margin:0; flex:1;">
-                                    <button class="btn-p" style="width:auto; padding:0 15px;">➔</button>
-                                </form>
-                            </div>
+                            <form action="/comentar/${p._id}" method="POST" style="display:flex; gap:5px; margin-top:10px;">
+                                <input name="texto" placeholder="Escribe un comentario..." required style="margin:0; flex:1;">
+                                <button class="btn-p" style="width:auto; padding:0 15px;">➔</button>
+                            </form>
                         </div>
                     `).join('')}
                 </div>
             `).join('')}
-
-            <div id="t4" class="section" style="display:none">
-                <div class="card">
-                    <h3>Gestión de Usuarios</h3>
-                    ${users.map(u => `
-                        <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px; background:#f8fafc; padding:10px; border-radius:15px;">
-                            <img src="${u.foto || 'https://via.placeholder.com/150'}" class="avatar">
-                            <div style="flex:1"><b>${u.user}</b> <small>(${u.rol})</small></div>
-                        </div>
-                    `).join('')}
-                </div>
-            </div>
-
+            
             <div id="t5" class="section" style="display:none">
                 <div class="card">
                     <h3>Ajustes</h3>
-                    <button class="btn-p" onclick="pedirPermisoNotis()" style="background:#10b981; margin-bottom:15px;">🔔 Activar Notificaciones</button>
+                    <button class="btn-p" onclick="activarNotis()" style="background:#10b981; margin-bottom:15px;">🔔 Activar Notificaciones</button>
                     <form action="/perfil" method="POST" enctype="multipart/form-data">
                         <p>Foto Perfil:</p><input type="file" name="foto" accept="image/*"><button class="btn-p">Guardar</button>
                     </form>
@@ -223,19 +227,23 @@ app.get('/', async (req, res) => {
             const app = initializeApp(firebaseConfig);
             const messaging = getMessaging(app);
 
-            window.pedirPermisoNotis = async () => {
-                const permission = await Notification.requestPermission();
-                if (permission === 'granted') {
-                    const token = await getToken(messaging, { vapidKey: 'TU_VAPID_KEY_AQUI' });
-                    if (token) {
-                        await fetch('/save-token', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ token })
+            window.activarNotis = async () => {
+                try {
+                    const permission = await Notification.requestPermission();
+                    if (permission === 'granted') {
+                        const token = await getToken(messaging, { 
+                            vapidKey: 'BHGq3Rd2nOh5OOFcQ_kmNRtK6HHoub8LpCKH14hWa0PbIlA4iE1a0mI86iT_CAX4N4GC7wkCfY1Q1lxMtvnGkWs' 
                         });
-                        alert("¡Notificaciones activadas!");
+                        if (token) {
+                            await fetch('/save-token', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ token })
+                            });
+                            alert("¡Notificaciones activadas!");
+                        }
                     }
-                }
+                } catch (e) { console.error(e); }
             };
 
             onMessage(messaging, (payload) => {
@@ -249,6 +257,7 @@ app.get('/', async (req, res) => {
     res.send(html);
 });
 
+// Auth y Perfil
 app.post('/auth', async (req, res) => {
     const { user, pass, pin } = req.body;
     let u = await User.findOne({ user, pass });
@@ -256,11 +265,7 @@ app.post('/auth', async (req, res) => {
         const rol = (pin === '2845') ? 'admin' : 'estudiante';
         u = await new User({ user, pass, rol }).save();
     }
-    if (!u.baneadoHasta || u.baneadoHasta < new Date()) {
-        req.session.u = u.user; req.session.rol = u.rol; res.redirect('/');
-    } else {
-        res.send("<script>alert('Baneado'); window.location='/';</script>");
-    }
+    req.session.u = u.user; req.session.rol = u.rol; res.redirect('/');
 });
 
 app.post('/perfil', upload.single('foto'), async (req, res) => {
@@ -276,4 +281,6 @@ app.post('/perfil', upload.single('foto'), async (req, res) => {
 
 app.get('/salir', (req, res) => { req.session.destroy(); res.redirect('/'); });
 
+app.listen(PORT, () => console.log('🚀 Aula Virtual 2026 Lista en Render'));
 app.listen(PORT, () => console.log('🚀 Aula Virtual con Notificaciones lista'));
+
