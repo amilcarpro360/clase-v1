@@ -1,182 +1,199 @@
-const express = require('express');
-const mongoose = require('mongoose');
-const cookieParser = require('cookie-parser');
-const bcrypt = require('bcryptjs');
-const multer = require('multer');
-const cloudinary = require('cloudinary').v2;
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
-const webpush = require('web-push');
+const express = require("express");
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const multer = require("multer");
+const cloudinary = require("cloudinary").v2;
+const webpush = require("web-push");
+const cors = require("cors");
+
 const app = express();
+app.use(express.json());
+app.use(cors());
 
-// CONFIGURACIÓN
-cloudinary.config({ cloud_name: 'dvlbsl16g', api_key: '721617469253873', api_secret: 'IkWS7Rx0vD8ktW62IdWmlbhNTPk' });
-mongoose.connect('mongodb+srv://admin:clase1789@cluster0.jbyog90.mongodb.net/?appName=Cluster0');
+/* ================== CONFIGURACIÓN INTEGRADA ================== */
 
-webpush.setVapidDetails('mailto:amilcarvaleromartinez33@gmail.com', 'BNmECJg52bN_RRCUhq5AD-YUllgurBcHptGOzp7OMYra91_QsRinoicJgrg0N_RseSpcYvGokul1ht2Os4TiGbs', 'Jt46xVYDT17wM3TXqZ-j3VuOw8apU5iE-RZWvLjfoFM');
+// 🔹 Mongo Atlas
+mongoose.connect("mongodb+srv://admin:clase1789@cluster0.jbyog90.mongodb.net/claseApp")
+.then(() => console.log("✅ Mongo conectado"))
+.catch(err => console.log(err));
 
-const storage = new CloudinaryStorage({ cloudinary, params: { folder: 'clase_hub' } });
-const upload = multer({ storage });
-
-// MODELOS
-const User = mongoose.model('User', {
-    username: { type: String, unique: true },
-    password: { type: String, required: true },
-    role: { type: String, default: 'user' },
-    photo: { type: String, default: 'https://i.imgur.com/6VBx3io.png' },
-    themeColor: { type: String, default: '#6366f1' },
-    isBanned: { type: Boolean, default: false }
+// 🔹 Cloudinary
+cloudinary.config({
+  cloud_name: "dvlbsl16g",
+  api_key: "721617469253873",
+  api_secret: "IkWS7Rx0vD8ktW62IdWmlbhNTPk"
 });
 
-const Post = mongoose.model('Post', {
-    author: String, authorId: String, authorImg: String, 
-    type: String, content: String, title: String, fileUrl: String, 
-    comments: [{ author: String, content: String, img: String }],
-    date: { type: Date, default: Date.now }
+// 🔹 Web Push
+webpush.setVapidDetails(
+  "mailto:amilcarvaleromartinez33@gmail.com",
+  "BOYDkx8i4CkqIwTEM_C3zi1r2XLs6CDhCahdUPRASD8UH7V0_bqsgY5IBvbaR_pze7guyfEk89cMKLO5du56z8M",
+  "4W4KYN5QhFWFV0I0XMgj0XgQv86JPjJLU9G4_nkxueQ"
+);
+
+const upload = multer({ dest: "uploads/" });
+
+/* ================== MODELOS ================== */
+
+const User = mongoose.model("User", new mongoose.Schema({
+  username: String,
+  email: String,
+  password: String,
+  role: { type: String, default: "user" },
+  bannedUntil: Date
+}));
+
+const Post = mongoose.model("Post", new mongoose.Schema({
+  title: String,
+  content: String,
+  type: String,
+  files: [String],
+  author: mongoose.Schema.Types.ObjectId
+}));
+
+const Subscription = mongoose.model("Subscription", new mongoose.Schema({
+  user: mongoose.Schema.Types.ObjectId,
+  subscription: Object
+}));
+
+/* ================== MIDDLEWARE ================== */
+
+function auth(req, res, next) {
+  const token = req.headers.authorization;
+  if (!token) return res.status(401).json({ msg: "No token" });
+
+  const decoded = jwt.verify(token, "supersecreto123");
+  req.user = decoded;
+  next();
+}
+
+function isAdmin(req, res, next) {
+  if (req.user.role !== "admin")
+    return res.status(403).json({ msg: "Solo admins" });
+  next();
+}
+
+function canPostDuda() {
+  const now = new Date();
+  const day = now.getDay();
+  const hour = now.getHours();
+
+  if (
+    (day === 5 && hour >= 18) ||
+    day === 6 ||
+    day === 0 ||
+    (day === 1 && hour < 8)
+  ) return false;
+
+  return true;
+}
+
+/* ================== AUTH ================== */
+
+app.post("/register", async (req, res) => {
+  const { username, email, password, adminCode } = req.body;
+
+  let role = "user";
+  if (adminCode === "2845") role = "admin";
+
+  const hashed = await bcrypt.hash(password, 10);
+
+  await User.create({
+    username,
+    email,
+    password: hashed,
+    role
+  });
+
+  res.json({ msg: "Usuario creado" });
 });
 
-const Config = mongoose.model('Config', { splash: { type: String, default: 'ClassHub' } });
+app.post("/login", async (req, res) => {
+  const { email, password } = req.body;
 
-app.use(express.json()); app.use(express.urlencoded({ extended: true })); app.use(cookieParser());
+  const user = await User.findOne({ email });
+  if (!user) return res.status(404).json({ msg: "No existe" });
 
-// RESTRICCIÓN DE DUDAS (Viernes 18:00 a Lunes 08:00) 
-const canPostDuda = () => {
-    const now = new Date();
-    const day = now.getDay(); // 0: Dom, 5: Vie, 1: Lun
-    const hour = now.getHours();
-    if ((day === 5 && hour >= 18) || day === 6 || day === 0 || (day === 1 && hour < 8)) return false;
-    return true;
-};
+  const valid = await bcrypt.compare(password, user.password);
+  if (!valid) return res.status(400).json({ msg: "Contraseña incorrecta" });
 
-// RUTAS DE SESIÓN 
-app.post('/auth/register', async (req, res) => {
-    const { username, password, pin } = req.body;
-    const hashed = await bcrypt.hash(password, 10);
-    const role = pin === '2845' ? 'admin' : 'user'; // Código Admin 
-    try {
-        const u = await User.create({ username, password: hashed, role });
-        res.cookie('userId', u._id).redirect('/');
-    } catch { res.send("Error"); }
+  const token = jwt.sign(
+    { id: user._id, role: user.role },
+    "supersecreto123"
+  );
+
+  res.json({ token });
 });
 
-app.post('/auth/login', async (req, res) => {
-    const u = await User.findOne({ username: req.body.username });
-    if (u && !u.isBanned && await bcrypt.compare(req.body.password, u.password)) {
-        res.cookie('userId', u._id).redirect('/');
-    } else { res.send("Error de acceso"); }
+/* ================== CREAR POST ================== */
+
+app.post("/post", auth, upload.single("file"), async (req, res) => {
+  const { title, content, type } = req.body;
+
+  if (type === "duda" && !canPostDuda()) {
+    return res.status(403).json({ msg: "No se puede publicar duda en este horario" });
+  }
+
+  let fileUrl = null;
+
+  if (req.file) {
+    const result = await cloudinary.uploader.upload(req.file.path);
+    fileUrl = result.secure_url;
+  }
+
+  const post = await Post.create({
+    title,
+    content,
+    type,
+    files: fileUrl ? [fileUrl] : [],
+    author: req.user.id
+  });
+
+  // 🔔 Enviar notificaciones
+  const subs = await Subscription.find();
+
+  subs.forEach(sub => {
+    webpush.sendNotification(
+      sub.subscription,
+      JSON.stringify({
+        title: "Nueva publicación",
+        body: title
+      })
+    );
+  });
+
+  res.json(post);
 });
 
-// ACCIONES DE CONTENIDO 
-app.post('/post', upload.single('archivo'), async (req, res) => {
-    const user = await User.findById(req.cookies.userId);
-    if (!user) return res.redirect('/');
-    if (req.body.type === 'duda' && !canPostDuda()) return res.send("Solo puedes poner una duda fuera del horario restringido.");
+/* ================== ADMIN ================== */
 
-    await Post.create({
-        author: user.username, authorId: user._id, authorImg: user.photo,
-        type: req.body.type, content: req.body.content, title: req.body.title || '',
-        fileUrl: req.file ? req.file.path : ''
-    });
-    res.redirect('/');
+app.get("/users", auth, isAdmin, async (req, res) => {
+  const users = await User.find();
+  res.json(users);
 });
 
-app.post('/comment/:id', upload.single('img'), async (req, res) => {
-    const user = await User.findById(req.cookies.userId);
-    const post = await Post.findById(req.params.id);
-    post.comments.push({ author: user.username, content: req.body.text, img: req.file ? req.file.path : '' });
-    await post.save();
-    res.redirect('/');
+app.put("/ban/:id", auth, isAdmin, async (req, res) => {
+  const bannedUntil = new Date();
+  bannedUntil.setDate(bannedUntil.getDate() + req.body.days);
+
+  await User.findByIdAndUpdate(req.params.id, { bannedUntil });
+  res.json({ msg: "Usuario baneado" });
 });
 
-// INTERFAZ 
-app.get('/', async (req, res) => {
-    const user = req.cookies.userId ? await User.findById(req.cookies.userId) : null;
-    const posts = await Post.find().sort({ date: -1 });
-    const users = await User.find();
-    const config = await Config.findOne() || { splash: "Bienvenido" };
+/* ================== NOTIFICACIONES ================== */
 
-    res.send(`
-    <html>
-    <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-        <style>
-            :root { --main: ${user ? user.themeColor : '#6366f1'}; }
-            body { font-family: sans-serif; background: #f0f2f5; margin: 0; padding-bottom: 70px; }
-            .card { background: white; margin: 10px; padding: 15px; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-            .nav { position: fixed; bottom: 0; width: 100%; background: white; display: flex; justify-content: space-around; padding: 10px 0; border-top: 1px solid #ddd; }
-            .btn { background: var(--main); color: white; border: none; padding: 10px; border-radius: 8px; width: 100%; cursor: pointer; }
-            .hidden { display: none; }
-            .user-row { display: flex; align-items: center; gap: 10px; padding: 10px; border-bottom: 1px solid #eee; }
-            .user-row img { width: 40px; height: 40px; border-radius: 50%; }
-        </style>
-    </head>
-    <body>
-        ${!user ? `
-            <div class="card" style="margin-top:50px;">
-                <h2>Iniciar Sesión</h2>
-                <form action="/auth/login" method="POST"><input name="username" placeholder="Usuario" style="width:100%; margin:5px 0; padding:10px;"><input name="password" type="password" placeholder="Contraseña" style="width:100%; margin:5px 0; padding:10px;"><button class="btn">Entrar</button></form>
-                <hr>
-                <h2>Registrarse</h2>
-                <form action="/auth/register" method="POST"><input name="username" placeholder="Usuario" style="width:100%; margin:5px 0; padding:10px;"><input name="password" type="password" placeholder="Contraseña" style="width:100%; margin:5px 0; padding:10px;"><input name="pin" placeholder="PIN Admin (Opcional)" style="width:100%; margin:5px 0; padding:10px;"><button class="btn" style="background:#555">Crear Cuenta</button></form>
-            </div>
-        ` : `
-            <div id="splash" style="position:fixed; inset:0; background:var(--main); color:white; display:flex; justify-content:center; align-items:center; z-index:9999;"><h1>${config.splash}</h1></div>
-            
-            <div id="content">
-                <section id="apuntes" class="tab">
-                    <div class="card">
-                        <form action="/post" method="POST" enctype="multipart/form-data">
-                            <input type="hidden" name="type" value="apunte">
-                            <textarea name="content" placeholder="Link o texto..." style="width:100%;"></textarea>
-                            <input type="file" name="archivo"><button class="btn">Subir</button>
-                        </form>
-                    </div>
-                    ${posts.filter(p => p.type === 'apunte').map(p => `<div class="card"><b>${p.author}:</b><p>${p.content}</p></div>`).join('')}
-                </section>
+app.post("/subscribe", auth, async (req, res) => {
+  await Subscription.create({
+    user: req.user.id,
+    subscription: req.body
+  });
 
-                <section id="fechas" class="tab hidden">
-                    <div class="card">
-                        <form action="/post" method="POST">
-                            <input type="hidden" name="type" value="fecha">
-                            <input name="title" placeholder="Título del evento" required style="width:100%; margin-bottom:5px;">
-                            <input type="date" name="content" required style="width:100%;">
-                            <button class="btn">Añadir Fecha</button>
-                        </form>
-                    </div>
-                    ${posts.filter(p => p.type === 'fecha').map(p => `<div class="card"><b>${p.content}</b> - ${p.title}</div>`).join('')}
-                </section>
-
-                ${user.role === 'admin' ? `
-                <section id="admin" class="tab hidden">
-                    <div class="card">
-                        <h3>Gestión de Usuarios</h3>
-                        ${users.map(u => `
-                            <div class="user-row">
-                                <img src="${u.photo}"> 
-                                <div><b>${u.username}</b><br><small>${u.role}</small></div>
-                            </div>
-                        `).join('')}
-                    </div>
-                </section>
-                ` : ''}
-            </div>
-
-            <nav class="nav">
-                <button onclick="tab('apuntes')">Apuntes</button>
-                <button onclick="tab('fechas')">Fechas</button>
-                <button onclick="tab('dudas')">Dudas</button>
-                <button onclick="tab('config')">Config</button>
-                ${user.role === 'admin' ? `<button onclick="tab('admin')">Admin</button>` : ''}
-            </nav>
-
-            <script>
-                function tab(id){ document.querySelectorAll('.tab').forEach(t=>t.classList.add('hidden')); document.getElementById(id).classList.remove('hidden'); }
-                setTimeout(()=>document.getElementById('splash').style.display='none', 1500);
-            </script>
-        `}
-    </body>
-    </html>
-    `);
+  res.json({ msg: "Suscripción guardada 🔔" });
 });
 
-app.listen(process.env.PORT || 3000);
+/* ================== START ================== */
+
+app.listen(process.env.PORT || 3000, () => {
+  console.log("🚀 Servidor funcionando");
+});
