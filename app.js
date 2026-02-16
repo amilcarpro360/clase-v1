@@ -1,6 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cookieParser = require('cookie-parser');
+const bcrypt = require('bcryptjs'); // Para encriptar contraseñas
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
@@ -22,7 +23,11 @@ const upload = multer({ storage });
 
 // --- 2. MODELOS ---
 const User = mongoose.model('User', {
-    username: String, role: String, photo: String, themeColor: { type: String, default: '#6366f1' }, pushSubscription: Object
+    username: { type: String, unique: true },
+    password: { type: String, required: true },
+    role: String, 
+    photo: { type: String, default: 'https://i.imgur.com/6VBx3io.png' },
+    themeColor: { type: String, default: '#6366f1' }
 });
 
 const Post = mongoose.model('Post', {
@@ -35,32 +40,47 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// --- 3. NUEVAS RUTAS: SESIÓN Y BORRADO ---
+// --- 3. RUTAS DE AUTENTICACIÓN ---
 
-// Cerrar Sesión
-app.get('/logout', (req, res) => {
-    res.clearCookie('userId'); // Borra la identificación
-    res.redirect('/');
+// Registro
+app.post('/auth/register', async (req, res) => {
+    const { username, password, adminCode } = req.body;
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const role = adminCode === '2845' ? 'admin' : 'user'; // Tu PIN confidencial
+    
+    try {
+        const user = await User.create({ username, password: hashedPassword, role });
+        res.cookie('userId', user._id).redirect('/');
+    } catch (e) { res.send("<script>alert('El usuario ya existe'); window.location='/';</script>"); }
 });
 
-// Borrar Cuenta (Auto-borrado o Admin)
-app.post('/delete-account/:id', async (req, res) => {
-    const user = await User.findById(req.cookies.userId);
-    const targetId = req.params.id;
-
-    // Solo puedes borrarte a ti mismo o ser borrado por un Admin
-    if (user && (user.role === 'admin' || user._id.toString() === targetId)) {
-        await User.findByIdAndDelete(targetId);
-        await Post.deleteMany({ authorId: targetId }); // Limpia sus posts
-        
-        if (user._id.toString() === targetId) {
-            res.clearCookie('userId');
-        }
+// Inicio de Sesión
+app.post('/auth/login', async (req, res) => {
+    const { username, password } = req.body;
+    const user = await User.findOne({ username });
+    if (user && await bcrypt.compare(password, user.password)) {
+        res.cookie('userId', user._id).redirect('/');
+    } else {
+        res.send("<script>alert('Datos incorrectos'); window.location='/';</script>");
     }
+});
+
+app.get('/logout', (req, res) => { res.clearCookie('userId').redirect('/'); });
+
+// --- 4. RUTAS DE CONTENIDO (POSTS) ---
+
+app.post('/post', upload.single('archivo'), async (req, res) => {
+    const user = await User.findById(req.cookies.userId);
+    if (!user) return res.redirect('/');
+    
+    await Post.create({
+        authorId: user._id, author: user.username, 
+        type: req.body.type, content: req.body.content, 
+        title: req.body.title || '', fileUrl: req.file ? req.file.path : ''
+    });
     res.redirect('/');
 });
 
-// --- 4. RUTAS RESTANTES (IGUALES) ---
 app.post('/delete-post/:id', async (req, res) => {
     const user = await User.findById(req.cookies.userId);
     const post = await Post.findById(req.params.id);
@@ -70,33 +90,7 @@ app.post('/delete-post/:id', async (req, res) => {
     res.redirect('/');
 });
 
-app.post('/update-config', async (req, res) => {
-    const user = await User.findById(req.cookies.userId);
-    if (user && req.body.color) { user.themeColor = req.body.color; await user.save(); }
-    if (user && user.role === 'admin' && req.body.splash) {
-        await Config.findOneAndUpdate({}, { splashText: req.body.splash }, { upsert: true });
-    }
-    res.redirect('/');
-});
-
-app.post('/register', async (req, res) => {
-    const role = req.body.code === '2845' ? 'admin' : 'user';
-    const user = await User.create({ username: req.body.username, role, photo: 'https://i.imgur.com/6VBx3io.png' });
-    res.cookie('userId', user._id).redirect('/');
-});
-
-app.post('/post', upload.single('archivo'), async (req, res) => {
-    const user = await User.findById(req.cookies.userId);
-    if (user) {
-        await Post.create({
-            authorId: user._id, author: user.username, type: req.body.type, 
-            content: req.body.content, title: req.body.titulo || '', fileUrl: req.file ? req.file.path : ''
-        });
-    }
-    res.redirect('/');
-});
-
-// --- 5. INTERFAZ ACTUALIZADA ---
+// --- 5. INTERFAZ ---
 app.get('/', async (req, res) => {
     const user = req.cookies.userId ? await User.findById(req.cookies.userId) : null;
     const posts = await Post.find().sort({ date: -1 });
@@ -112,29 +106,48 @@ app.get('/', async (req, res) => {
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
         <style>
             :root { --main: ${user ? user.themeColor : '#6366f1'}; }
-            body { font-family: sans-serif; background: #f8fafc; margin: 0; padding-bottom: 80px; }
-            #splash { position: fixed; inset: 0; background: var(--main); color: white; display: flex; justify-content: center; align-items: center; z-index: 9999; transition: 0.8s; }
-            nav { position: fixed; bottom: 0; width: 100%; background: white; display: flex; justify-content: space-around; padding: 12px 0; border-top: 1px solid #e2e8f0; }
+            body { font-family: sans-serif; background: #f8fafc; margin: 0; padding-bottom: 80px; color: #333; }
+            #splash { position: fixed; inset: 0; background: var(--main); color: white; display: flex; justify-content: center; align-items: center; z-index: 9999; }
             .card { background: white; margin: 12px; padding: 15px; border-radius: 16px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); position: relative; }
+            nav { position: fixed; bottom: 0; width: 100%; background: white; display: flex; justify-content: space-around; padding: 12px 0; border-top: 1px solid #eee; z-index: 1000; }
             .btn { background: var(--main); color: white; border: none; padding: 12px; border-radius: 12px; width: 100%; font-weight: bold; cursor: pointer; margin-top:10px; }
-            .btn-danger { background: #ff4d4d; }
-            .nav-item { background: none; border: none; color: #64748b; font-size: 0.7rem; display: flex; flex-direction: column; align-items: center; cursor: pointer; }
-            .nav-item.active { color: var(--main); }
-            .delete-btn { position: absolute; top: 10px; right: 10px; color: #ff4d4d; cursor: pointer; background: none; border: none; }
             .hidden { display: none; }
-            input, textarea { width: 100%; padding: 10px; margin: 8px 0; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
+            .nav-item { background: none; border: none; color: #64748b; font-size: 0.7rem; display: flex; flex-direction: column; align-items: center; }
+            .nav-item.active { color: var(--main); }
+            input, textarea { width: 100%; padding: 12px; margin: 8px 0; border: 1px solid #ddd; border-radius: 10px; box-sizing: border-box; }
         </style>
     </head>
     <body>
         ${!user ? `
-            <div class="card" style="margin-top:100px; text-align:center;">
-                <h2>ClassHub</h2>
-                <form action="/register" method="POST">
-                    <input name="username" placeholder="Tu Nombre" required>
-                    <input name="code" placeholder="Código Admin">
+            <div id="auth-container" class="card" style="margin-top:80px; text-align:center;">
+                <h1 style="color:var(--main)">ClassHub</h1>
+                <div id="btn-group" style="display:flex; gap:10px;">
+                    <button class="btn" onclick="showAuth('login')">Iniciar Sesión</button>
+                    <button class="btn" onclick="showAuth('register')" style="background:#64748b">Registrarse</button>
+                </div>
+
+                <form id="login-form" action="/auth/login" method="POST" class="hidden">
+                    <input name="username" placeholder="Usuario" required>
+                    <input name="password" type="password" placeholder="Contraseña" required>
                     <button class="btn">Entrar</button>
+                    <p onclick="showAuth('main')" style="cursor:pointer; font-size:0.8rem; color:grey;">Volver</p>
+                </form>
+
+                <form id="register-form" action="/auth/register" method="POST" class="hidden">
+                    <input name="username" placeholder="Elige Usuario" required>
+                    <input name="password" type="password" placeholder="Contraseña" required>
+                    <input name="adminCode" type="password" placeholder="PIN Admin (opcional)">
+                    <button class="btn">Crear Cuenta</button>
+                    <p onclick="showAuth('main')" style="cursor:pointer; font-size:0.8rem; color:grey;">Volver</p>
                 </form>
             </div>
+            <script>
+                function showAuth(mode) {
+                    document.getElementById('btn-group').classList.toggle('hidden', mode !== 'main');
+                    document.getElementById('login-form').classList.toggle('hidden', mode !== 'login');
+                    document.getElementById('register-form').classList.toggle('hidden', mode !== 'register');
+                }
+            </script>
         ` : `
             <div id="splash"><h1>${config.splashText}</h1></div>
             
@@ -143,50 +156,51 @@ app.get('/', async (req, res) => {
                     <div class="card">
                         <form action="/post" method="POST" enctype="multipart/form-data">
                             <input type="hidden" name="type" value="apunte">
-                            <textarea name="content" placeholder="Sube algo..."></textarea>
-                            <input type="file" name="archivo"><button class="btn">Publicar</button>
+                            <textarea name="content" placeholder="Publicar apuntes..."></textarea>
+                            <input type="file" name="archivo"><button class="btn">Compartir</button>
                         </form>
                     </div>
                     ${posts.filter(p => p.type === 'apunte').map(p => `
                         <div class="card">
-                            ${(user.role === 'admin' || p.authorId === user._id.toString()) ? `<form action="/delete-post/${p._id}" method="POST"><button class="delete-btn"><i class="fas fa-trash"></i></button></form>` : ''}
                             <strong>${p.author}</strong><p>${p.content}</p>
                             ${p.fileUrl ? `<img src="${p.fileUrl}" style="width:100%; border-radius:12px;">` : ''}
                         </div>
                     `).join('')}
                 </section>
 
-                <section id="config" class="tab-content hidden">
+                <section id="fechas" class="tab-content hidden">
                     <div class="card">
-                        <h3>Configuración</h3>
-                        <form action="/update-config" method="POST">
-                            <label>Tema Color:</label>
-                            <input type="color" name="color" value="${user.themeColor}" style="height:45px;">
-                            ${user.role === 'admin' ? `<label>Splash Text:</label><input type="text" name="splash" value="${config.splashText}">` : ''}
-                            <button class="btn">Guardar</button>
-                        </form>
-                        <hr style="margin:20px 0; border:0; border-top:1px solid #eee;">
-                        <button class="btn" onclick="location.href='/logout'" style="background:#64748b">Cerrar Sesión</button>
-                        <form action="/delete-account/${user._id}" method="POST" onsubmit="return confirm('¿Borrar tu cuenta permanentemente?')">
-                            <button class="btn btn-danger">Borrar mi cuenta</button>
+                        <h3>📅 Calendario de Clase</h3>
+                        <form action="/post" method="POST">
+                            <input type="hidden" name="type" value="fecha">
+                            <input type="date" name="content" required>
+                            <input type="text" name="title" placeholder="Título del Examen/Entrega" required>
+                            <button class="btn">Añadir Fecha</button>
                         </form>
                     </div>
+                    ${posts.filter(p => p.type === 'fecha').map(p => `
+                        <div class="card" style="border-left:5px solid var(--main)">
+                            <b>${p.content}</b> - ${p.title}
+                        </div>
+                    `).join('')}
                 </section>
 
-                <section id="admin" class="tab-content hidden">
+                <section id="dudas" class="tab-content hidden">
                     <div class="card">
-                        <h3>Gestión de Usuarios</h3>
-                        ${users.map(u => `
-                            <div style="display:flex; align-items:center; gap:10px; padding:10px; border-bottom:1px solid #eee;">
-                                <img src="${u.photo}" style="width:40px; border-radius:50%;">
-                                <div style="flex:1"><b>${u.username}</b></div>
-                                ${u.role !== 'admin' ? `
-                                    <form action="/delete-account/${u._id}" method="POST" onsubmit="return confirm('¿Expulsar a este usuario?')">
-                                        <button style="border:none; background:none; color:red; cursor:pointer;"><i class="fas fa-user-times"></i></button>
-                                    </form>
-                                ` : '<small>Admin</small>'}
-                            </div>
-                        `).join('')}
+                        <form action="/post" method="POST">
+                            <input type="hidden" name="type" value="duda">
+                            <textarea name="content" placeholder="¿Qué no entiendes?"></textarea>
+                            <button class="btn">Lanzar Duda</button>
+                        </form>
+                    </div>
+                    ${posts.filter(p => p.type === 'duda').map(p => `
+                        <div class="card"><b>${p.author}:</b> ${p.content}</div>
+                    `).join('')}
+                </section>
+
+                <section id="config" class="tab-content hidden">
+                    <div class="card">
+                        <button class="btn" onclick="location.href='/logout'" style="background:#64748b">Cerrar Sesión</button>
                     </div>
                 </section>
             </div>
@@ -196,7 +210,7 @@ app.get('/', async (req, res) => {
                 <button class="nav-item" onclick="tab('fechas', this)"><i class="fas fa-calendar"></i><span>Fechas</span></button>
                 <button class="nav-item" onclick="tab('dudas', this)"><i class="fas fa-question"></i><span>Dudas</span></button>
                 <button class="nav-item" onclick="tab('config', this)"><i class="fas fa-cog"></i><span>Config</span></button>
-                ${user.role === 'admin' ? '<button class="nav-item" onclick="tab(\'admin\', this)"><i class="fas fa-user-shield"></i><span>Admin</span></button>' : ''}
+                ${user.role === 'admin' ? `<button class="nav-item" onclick="tab('admin', this)"><i class="fas fa-user-shield"></i><span>Admin</span></button>` : ''}
             </nav>
 
             <script>
