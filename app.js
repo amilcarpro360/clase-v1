@@ -35,9 +35,32 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// --- 3. RUTAS DE LÓGICA ---
+// --- 3. NUEVAS RUTAS: SESIÓN Y BORRADO ---
 
-// Eliminar Post (Admin borra todo, User solo lo suyo)
+// Cerrar Sesión
+app.get('/logout', (req, res) => {
+    res.clearCookie('userId'); // Borra la identificación
+    res.redirect('/');
+});
+
+// Borrar Cuenta (Auto-borrado o Admin)
+app.post('/delete-account/:id', async (req, res) => {
+    const user = await User.findById(req.cookies.userId);
+    const targetId = req.params.id;
+
+    // Solo puedes borrarte a ti mismo o ser borrado por un Admin
+    if (user && (user.role === 'admin' || user._id.toString() === targetId)) {
+        await User.findByIdAndDelete(targetId);
+        await Post.deleteMany({ authorId: targetId }); // Limpia sus posts
+        
+        if (user._id.toString() === targetId) {
+            res.clearCookie('userId');
+        }
+    }
+    res.redirect('/');
+});
+
+// --- 4. RUTAS RESTANTES (IGUALES) ---
 app.post('/delete-post/:id', async (req, res) => {
     const user = await User.findById(req.cookies.userId);
     const post = await Post.findById(req.params.id);
@@ -47,19 +70,10 @@ app.post('/delete-post/:id', async (req, res) => {
     res.redirect('/');
 });
 
-// Cambiar Configuración
 app.post('/update-config', async (req, res) => {
     const user = await User.findById(req.cookies.userId);
-    if (!user) return res.redirect('/');
-    
-    // Cambiar color del usuario
-    if (req.body.color) {
-        user.themeColor = req.body.color;
-        await user.save();
-    }
-    
-    // Cambiar Splash (Solo Admin)
-    if (user.role === 'admin' && req.body.splash) {
+    if (user && req.body.color) { user.themeColor = req.body.color; await user.save(); }
+    if (user && user.role === 'admin' && req.body.splash) {
         await Config.findOneAndUpdate({}, { splashText: req.body.splash }, { upsert: true });
     }
     res.redirect('/');
@@ -73,15 +87,16 @@ app.post('/register', async (req, res) => {
 
 app.post('/post', upload.single('archivo'), async (req, res) => {
     const user = await User.findById(req.cookies.userId);
-    if (!user) return res.redirect('/');
-    await Post.create({
-        authorId: user._id, author: user.username, type: req.body.type, 
-        content: req.body.content, title: req.body.titulo || '', fileUrl: req.file ? req.file.path : ''
-    });
+    if (user) {
+        await Post.create({
+            authorId: user._id, author: user.username, type: req.body.type, 
+            content: req.body.content, title: req.body.titulo || '', fileUrl: req.file ? req.file.path : ''
+        });
+    }
     res.redirect('/');
 });
 
-// --- 4. INTERFAZ ---
+// --- 5. INTERFAZ ACTUALIZADA ---
 app.get('/', async (req, res) => {
     const user = req.cookies.userId ? await User.findById(req.cookies.userId) : null;
     const posts = await Post.find().sort({ date: -1 });
@@ -101,12 +116,13 @@ app.get('/', async (req, res) => {
             #splash { position: fixed; inset: 0; background: var(--main); color: white; display: flex; justify-content: center; align-items: center; z-index: 9999; transition: 0.8s; }
             nav { position: fixed; bottom: 0; width: 100%; background: white; display: flex; justify-content: space-around; padding: 12px 0; border-top: 1px solid #e2e8f0; }
             .card { background: white; margin: 12px; padding: 15px; border-radius: 16px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); position: relative; }
-            .btn { background: var(--main); color: white; border: none; padding: 10px; border-radius: 10px; cursor: pointer; font-weight: bold; width: 100%; }
+            .btn { background: var(--main); color: white; border: none; padding: 12px; border-radius: 12px; width: 100%; font-weight: bold; cursor: pointer; margin-top:10px; }
+            .btn-danger { background: #ff4d4d; }
             .nav-item { background: none; border: none; color: #64748b; font-size: 0.7rem; display: flex; flex-direction: column; align-items: center; cursor: pointer; }
             .nav-item.active { color: var(--main); }
             .delete-btn { position: absolute; top: 10px; right: 10px; color: #ff4d4d; cursor: pointer; background: none; border: none; }
             .hidden { display: none; }
-            input, textarea { width: 100%; padding: 10px; margin: 8px 0; border: 1px solid #ddd; border-radius: 8px; }
+            input, textarea { width: 100%; padding: 10px; margin: 8px 0; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
         </style>
     </head>
     <body>
@@ -142,24 +158,35 @@ app.get('/', async (req, res) => {
 
                 <section id="config" class="tab-content hidden">
                     <div class="card">
-                        <h3>Personalización</h3>
+                        <h3>Configuración</h3>
                         <form action="/update-config" method="POST">
-                            <label>Tu color de tema:</label>
-                            <input type="color" name="color" value="${user.themeColor}" style="height:50px;">
-                            ${user.role === 'admin' ? `
-                                <hr>
-                                <label>Mensaje de Bienvenida (Splash):</label>
-                                <input type="text" name="splash" value="${config.splashText}">
-                            ` : ''}
-                            <button class="btn" style="margin-top:10px;">Guardar Cambios</button>
+                            <label>Tema Color:</label>
+                            <input type="color" name="color" value="${user.themeColor}" style="height:45px;">
+                            ${user.role === 'admin' ? `<label>Splash Text:</label><input type="text" name="splash" value="${config.splashText}">` : ''}
+                            <button class="btn">Guardar</button>
+                        </form>
+                        <hr style="margin:20px 0; border:0; border-top:1px solid #eee;">
+                        <button class="btn" onclick="location.href='/logout'" style="background:#64748b">Cerrar Sesión</button>
+                        <form action="/delete-account/${user._id}" method="POST" onsubmit="return confirm('¿Borrar tu cuenta permanentemente?')">
+                            <button class="btn btn-danger">Borrar mi cuenta</button>
                         </form>
                     </div>
                 </section>
 
                 <section id="admin" class="tab-content hidden">
                     <div class="card">
-                        <h3>Usuarios</h3>
-                        ${users.map(u => `<div style="display:flex; align-items:center; gap:10px; padding:10px; border-bottom:1px solid #eee;"><img src="${u.photo}" style="width:40px; border-radius:50%;"><b>${u.username}</b></div>`).join('')}
+                        <h3>Gestión de Usuarios</h3>
+                        ${users.map(u => `
+                            <div style="display:flex; align-items:center; gap:10px; padding:10px; border-bottom:1px solid #eee;">
+                                <img src="${u.photo}" style="width:40px; border-radius:50%;">
+                                <div style="flex:1"><b>${u.username}</b></div>
+                                ${u.role !== 'admin' ? `
+                                    <form action="/delete-account/${u._id}" method="POST" onsubmit="return confirm('¿Expulsar a este usuario?')">
+                                        <button style="border:none; background:none; color:red; cursor:pointer;"><i class="fas fa-user-times"></i></button>
+                                    </form>
+                                ` : '<small>Admin</small>'}
+                            </div>
+                        `).join('')}
                     </div>
                 </section>
             </div>
@@ -179,7 +206,7 @@ app.get('/', async (req, res) => {
                     document.getElementById(id).classList.remove('hidden');
                     btn.classList.add('active');
                 }
-                window.onload = () => setTimeout(() => document.getElementById('splash').style.display = 'none', 1500);
+                window.onload = () => setTimeout(() => document.getElementById('splash').style.display = 'none', 1200);
             </script>
         `}
     </body>
