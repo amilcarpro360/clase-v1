@@ -7,80 +7,64 @@ const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const webpush = require('web-push');
 const app = express();
 
-// --- 1. CONFIGURACIÓN CLOUDINARY (Pega tus llaves aquí cuando las tengas) ---
+// 1. CONFIGURACIÓN (Usa variables de entorno en Render para seguridad)
+const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://admin:clase1789@cluster0.jbyog90.mongodb.net/?appName=Cluster0'; // Tu link de MongoDB
 cloudinary.config({ 
-  cloud_name: 'TU_CLOUD_NAME', 
-  api_key: 'TU_API_KEY', 
-  api_secret: 'TU_API_SECRET' 
+  cloud_name: process.env.CLOUD_NAME || 'dvlbsl16g', 
+  api_key: process.env.CLOUD_KEY || '721617469253873', 
+  api_secret: process.env.CLOUD_SECRET || 'IkWS7Rx0vD8ktW62IdWmlbhNTPk' 
 });
 
-const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: { folder: 'classhub', allowed_formats: ['jpg', 'png', 'pdf', 'mp4'] },
-});
-const upload = multer({ storage: storage });
+// Configuración de Notificaciones (Genera tus llaves una vez y ponlas fijas)
+const vapidKeys = {
+    publicKey: 'BNmECJg52bN_RRCUhq5AD-YUllgurBcHptGOzp7OMYra91_QsRinoicJgrg0N_RseSpcYvGokul1ht2Os4TiGbs', 
+    privateKey: 'Jt46xVYDT17wM3TXqZ-j3VuOw8apU5iE-RZWvLjfoFM'
+};
+// Si no tienes llaves, el servidor las genera, pero en Render se perderían. 
+// Es mejor usar webpush.generateVAPIDKeys() una vez y copiar los strings aquí.
+webpush.setVapidDetails('amilcarvaleromartinez33@gmail.com', vapidKeys.publicKey, vapidKeys.privateKey);
 
-// --- 2. CONFIGURACIÓN NOTIFICACIONES (VAPID) ---
-const vapidKeys = webpush.generateVAPIDKeys();
-webpush.setVapidDetails('mailto:tu-email@gmail.com', vapidKeys.publicKey, vapidKeys.privateKey);
+const storage = new CloudinaryStorage({ cloudinary, params: { folder: 'classhub_render' } });
+const upload = multer({ storage });
 
-// --- 3. MODELOS DE DATOS ---
-mongoose.connect('mongodb://localhost:27017/claseDB').then(() => console.log("MongoDB Conectado"));
+// 2. MODELOS
+mongoose.connect(MONGO_URI).then(() => console.log("Conectado a la nube"));
 
 const User = mongoose.model('User', {
     username: String,
     role: { type: String, default: 'user' },
-    photo: { type: String, default: 'https://cdn-icons-png.flaticon.com/512/3135/3135715.png' },
-    themeColor: { type: String, default: '#4A90E2' },
-    pushSubscription: Object,
-    bannedUntil: Date
+    photo: { type: String, default: 'https://i.imgur.com/6VBx3io.png' },
+    themeColor: { type: String, default: '#6366f1' },
+    pushSubscription: Object
 });
 
 const Post = mongoose.model('Post', {
-    author: String,
-    type: String, // 'apunte', 'duda', 'fecha'
-    content: String,
-    fileUrl: String,
-    createdAt: { type: Date, default: Date.now }
+    author: String, type: String, content: String, fileUrl: String, date: { type: Date, default: Date.now }
 });
 
-let globalSplashText = "Bienvenido a ClassHub"; // Configurable por admin
+let splashMsg = "Cargando ClassHub...";
 
-// --- 4. MIDDLEWARES ---
-app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// Función para regla horaria (Regla 6)
-const canPostDuda = (userPosts) => {
-    const now = new Date();
-    const day = now.getDay();
-    const hour = now.getHours();
-    const isWeekend = (day === 5 && hour >= 18) || day === 6 || day === 0 || (day === 1 && hour < 8);
-    if (!isWeekend) return true;
-    return userPosts.filter(p => p.type === 'duda' && p.createdAt > new Date().setHours(0,0,0,0)).length < 1;
-};
+// 3. RUTAS
+app.post('/subscribe', async (req, res) => {
+    const user = await User.findById(req.cookies.userId);
+    if(user) { user.pushSubscription = req.body; await user.save(); }
+    res.status(201).json({});
+});
 
-// --- 5. RUTAS ---
-
-// Registro y Admin Code
 app.post('/register', async (req, res) => {
-    const { username, code } = req.body;
-    const role = (code === '2845') ? 'admin' : 'user';
-    const user = await User.create({ username, role });
+    const role = req.body.code === '2845' ? 'admin' : 'user';
+    const user = await User.create({ username: req.body.username, role });
     res.cookie('userId', user._id).redirect('/');
 });
 
-// Publicar (Apuntes/Dudas) + Cloudinary + Notificación
 app.post('/post', upload.single('archivo'), async (req, res) => {
     const user = await User.findById(req.cookies.userId);
-    if (!user || (user.bannedUntil && user.bannedUntil > new Date())) return res.send("Baneado.");
-
-    const userPosts = await Post.find({ author: user.username });
-    if (req.body.type === 'duda' && !canPostDuda(userPosts)) {
-        return res.send("<script>alert('Límite de 1 duda en fin de semana'); window.location='/';</script>");
-    }
-
+    if(!user) return res.redirect('/');
+    
     await Post.create({
         author: user.username,
         type: req.body.type,
@@ -88,140 +72,123 @@ app.post('/post', upload.single('archivo'), async (req, res) => {
         fileUrl: req.file ? req.file.path : ''
     });
 
-    // Enviar notificación a todos
+    // Enviar notis a todos
     const subs = await User.find({ pushSubscription: { $exists: true } });
     subs.forEach(s => {
         webpush.sendNotification(s.pushSubscription, JSON.stringify({ 
-            title: `Nuevo en ${req.body.type}`, 
-            body: `${user.username} ha publicado algo.` 
-        })).catch(() => {});
+            title: "¡Nueva publicación!", 
+            body: `${user.username} ha subido contenido.` 
+        })).catch(e => console.log("Error de noti"));
     });
 
     res.redirect('/');
 });
 
-// Suscripción a notificaciones
-app.post('/subscribe', async (req, res) => {
-    const user = await User.findById(req.cookies.userId);
-    if (user) {
-        user.pushSubscription = req.body;
-        await user.save();
-        res.status(201).json({});
-    }
-});
-
-// Service Worker dinámico
+// Service Worker para Render
 app.get('/sw.js', (req, res) => {
     res.set('Content-Type', 'application/javascript');
     res.send(`
         self.addEventListener('push', e => {
             const data = e.data.json();
-            self.registration.showNotification(data.title, { body: data.body, icon: 'https://cdn-icons-png.flaticon.com/512/1154/1154047.png' });
+            self.registration.showNotification(data.title, {
+                body: data.body,
+                icon: 'https://i.imgur.com/6VBx3io.png'
+            });
         });
     `);
 });
 
-// --- 6. INTERFAZ HTML INTEGRADA ---
+// 4. DISEÑO Y HTML
 app.get('/', async (req, res) => {
     const user = req.cookies.userId ? await User.findById(req.cookies.userId) : null;
-    const posts = await Post.find().sort({ createdAt: -1 });
-    const allUsers = user?.role === 'admin' ? await User.find() : [];
+    const posts = await Post.find().sort({ date: -1 });
+    const users = await User.find();
 
     res.send(`
     <!DOCTYPE html>
     <html lang="es">
     <head>
-        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>ClassHub</title>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
         <style>
-            :root { --main: ${user ? user.themeColor : '#4A90E2'}; }
-            body { font-family: 'Segoe UI', sans-serif; margin: 0; background: #f0f2f5; }
-            #splash { position: fixed; inset: 0; background: var(--main); color: white; display: flex; justify-content: center; align-items: center; z-index: 9000; transition: 1s; font-size: 24px; font-weight: bold; }
-            nav { background: white; padding: 15px; display: flex; justify-content: center; gap: 15px; position: sticky; top: 0; box-shadow: 0 2px 5px rgba(0,0,0,0.1); z-index: 1000; }
-            .tab-btn { border: none; background: none; padding: 10px; cursor: pointer; font-weight: bold; color: #666; }
-            .tab-btn.active { color: var(--main); border-bottom: 3px solid var(--main); }
-            .container { max-width: 600px; margin: 20px auto; padding: 0 10px; }
-            .card { background: white; border-radius: 12px; padding: 15px; margin-bottom: 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
-            .user-item { display: flex; align-items: center; gap: 15px; padding: 10px; border-bottom: 1px solid #eee; }
-            .user-item img { width: 50px; height: 50px; border-radius: 50%; object-fit: cover; }
+            :root { --main: ${user ? user.themeColor : '#6366f1'}; }
+            body { font-family: sans-serif; background: #f0f2f5; margin: 0; padding-bottom: 70px; }
+            #splash { position: fixed; inset: 0; background: var(--main); color: white; display: flex; justify-content: center; align-items: center; z-index: 9999; transition: 0.8s; }
+            nav { position: fixed; bottom: 0; width: 100%; background: white; display: flex; justify-content: space-around; padding: 10px 0; border-top: 1px solid #ddd; }
+            .card { background: white; margin: 10px; padding: 15px; border-radius: 15px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+            .btn { background: var(--main); color: white; border: none; padding: 10px; width: 100%; border-radius: 10px; cursor: pointer; }
             .hidden { display: none; }
-            input, textarea { width: 100%; padding: 10px; margin: 5px 0; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
-            .btn { background: var(--main); color: white; border: none; padding: 10px; border-radius: 8px; width: 100%; cursor: pointer; font-weight: bold; }
+            .nav-btn { background: none; border: none; color: #666; font-size: 0.8rem; cursor: pointer; }
+            .nav-btn.active { color: var(--main); }
         </style>
     </head>
     <body>
-        ${!user ? `
-            <div class="container" style="margin-top:100px; text-align:center;">
+    ${!user ? `
+        <div class="card" style="margin-top:50px; text-align:center;">
+            <h2>Bienvenido a Clase</h2>
+            <form action="/register" method="POST">
+                <input name="username" placeholder="Tu Nombre" required style="width:90%; padding:10px; margin-bottom:10px;">
+                <input name="code" placeholder="Código Admin" style="width:90%; padding:10px; margin-bottom:10px;">
+                <button class="btn">Entrar</button>
+            </form>
+        </div>
+    ` : `
+        <div id="splash"><h1>${splashMsg}</h1></div>
+        <div class="container">
+            <section id="apuntes" class="tab-content">
                 <div class="card">
-                    <h2>Bienvenido</h2>
-                    <form action="/register" method="POST">
-                        <input name="username" placeholder="Tu Nombre" required>
-                        <input name="code" placeholder="Código Admin (opcional)">
-                        <button class="btn">Entrar</button>
-                    </form>
-                </div>
-            </div>
-        ` : `
-            <div id="splash">${globalSplashText}</div>
-            <nav>
-                <button class="tab-btn active" onclick="showTab('apuntes')">Apuntes</button>
-                <button class="tab-btn" onclick="showTab('fechas')">Fechas</button>
-                <button class="tab-btn" onclick="showTab('dudas')">Dudas</button>
-                <button class="tab-btn" onclick="showTab('config')">Config</button>
-                ${user.role === 'admin' ? '<button class="tab-btn" onclick="showTab(\'admin\')">👤 Gestión</button>' : ''}
-            </nav>
-
-            <div class="container">
-                <section id="apuntes" class="tab-content">
-                    <form class="card" action="/post" method="POST" enctype="multipart/form-data">
+                    <form action="/post" method="POST" enctype="multipart/form-data">
                         <input type="hidden" name="type" value="apunte">
                         <textarea name="content" placeholder="Escribe algo..."></textarea>
                         <input type="file" name="archivo">
-                        <button class="btn">Subir Apunte</button>
+                        <button class="btn">Publicar</button>
                     </form>
-                    ${posts.filter(p => p.type === 'apunte').map(p => `<div class="card"><b>${p.author}</b><p>${p.content}</p>${p.fileUrl ? `<img src="${p.fileUrl}" style="width:100%; border-radius:8px;">` : ''}</div>`).join('')}
-                </section>
-
-                <section id="admin" class="tab-content hidden">
-                    <div class="card">
-                        <h3>Gestión de Usuarios</h3>
-                        ${allUsers.map(u => `
-                            <div class="user-item">
-                                <img src="${u.photo}">
-                                <div style="flex:1"><b>${u.username}</b><br><small>${u.role}</small></div>
-                                <button onclick="alert('Baneado')" style="color:red">Ban</button>
-                            </div>
-                        `).join('')}
-                    </div>
-                </section>
-            </div>
-
-            <script>
-                function showTab(id) {
-                    document.querySelectorAll('.tab-content').forEach(s => s.classList.add('hidden'));
-                    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-                    document.getElementById(id).classList.remove('hidden');
-                    event.currentTarget.classList.add('active');
-                }
-
-                window.onload = async () => {
-                    setTimeout(() => document.getElementById('splash').style.display = 'none', 1500);
-                    
-                    // Registro de notificaciones
-                    if ('serviceWorker' in navigator) {
-                        const sw = await navigator.serviceWorker.register('/sw.js');
-                        const sub = await sw.pushManager.subscribe({
+                </div>
+                ${posts.map(p => `<div class="card"><b>${p.author}</b><p>${p.content}</p>${p.fileUrl ? `<img src="${p.fileUrl}" style="width:100%; border-radius:10px;">`:''}</div>`).join('')}
+            </section>
+        </div>
+        <nav>
+            <button class="nav-btn active" onclick="tab('apuntes')"><i class="fas fa-book"></i><br>Apuntes</button>
+            <button class="nav-btn" onclick="tab('dudas')"><i class="fas fa-question"></i><br>Dudas</button>
+            <button class="nav-btn" onclick="tab('config')"><i class="fas fa-cog"></i><br>Config</button>
+            ${user.role === 'admin' ? '<button class="nav-btn" onclick="tab(\'admin\')"><i class="fas fa-user-shield"></i><br>Admin</button>':''}
+        </nav>
+        <script>
+            function tab(id) {
+                document.querySelectorAll('.tab-content').forEach(s => s.classList.add('hidden'));
+                document.getElementById(id).classList.remove('hidden');
+            }
+            window.onload = () => {
+                setTimeout(() => document.getElementById('splash').style.opacity = '0', 1000);
+                setTimeout(() => document.getElementById('splash').style.display = 'none', 1800);
+                
+                // Activar Notis YouTube
+                if ('serviceWorker' in navigator) {
+                    navigator.serviceWorker.register('/sw.js').then(sw => {
+                        sw.pushManager.subscribe({
                             userVisibleOnly: true,
-                            applicationServerKey: '${vapidKeys.publicKey}'
+                            applicationServerKey: urlBase64ToUint8Array('${vapidKeys.publicKey}')
+                        }).then(sub => {
+                            fetch('/subscribe', { method: 'POST', body: JSON.stringify(sub), headers: {'content-type':'application/json'} });
                         });
-                        await fetch('/subscribe', { method: 'POST', body: JSON.stringify(sub), headers: {'content-type': 'application/json'} });
-                    }
+                    });
                 }
-            </script>
-        `}
+            }
+            function urlBase64ToUint8Array(base64String) {
+                const padding = '='.repeat((4 - base64String.length % 4) % 4);
+                const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+                const rawData = window.atob(base64);
+                const outputArray = new Uint8Array(rawData.length);
+                for (let i = 0; i < rawData.length; ++i) { outputArray[i] = rawData.charCodeAt(i); }
+                return outputArray;
+            }
+        </script>
+    `}
     </body>
     </html>
     `);
 });
 
-app.listen(3000, () => console.log("Servidor en http://localhost:3000"));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("Servidor corriendo"));
