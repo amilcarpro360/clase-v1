@@ -1,11 +1,8 @@
 {
   "name": "clase-hub",
   "version": "1.0.0",
-  "description": "Plataforma para compartir apuntes y dudas",
   "main": "app.js",
-  "scripts": {
-    "start": "node app.js"
-  },
+  "scripts": { "start": "node app.js" },
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "cloudinary": "^1.37.0",
@@ -15,8 +12,5 @@
     "multer": "^1.4.5-lts.1",
     "multer-storage-cloudinary": "^4.0.0",
     "web-push": "^3.6.3"
-  },
-  "engines": {
-    "node": ">=14.0.0"
   }
 }
