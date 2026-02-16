@@ -1,10 +1,16 @@
+// sw.js
 self.addEventListener('push', function(event) {
-    const data = event.data ? event.data.json() : { title: 'Notificación de Clase', body: 'Tienes una nueva actualización.' };
+    const data = event.data ? event.data.json() : { title: 'Actualización', body: 'Nueva actividad en la clase' };
     const options = {
         body: data.body,
-        icon: 'https://res.cloudinary.com/demo/image/upload/v1312461204/sample.jpg',
-        badge: 'https://res.cloudinary.com/demo/image/upload/v1312461204/sample.jpg',
-        vibrate: [100, 50, 100]
+        icon: 'https://res.cloudinary.com/dvlbsl16g/image/upload/v1/samples/logo',
+        vibrate: [200, 100, 200],
+        badge: 'https://res.cloudinary.com/dvlbsl16g/image/upload/v1/samples/logo'
     };
     event.waitUntil(self.registration.showNotification(data.title, options));
+});
+
+self.addEventListener('notificationclick', function(event) {
+    event.notification.close();
+    event.waitUntil(clients.openWindow('/'));
 });
