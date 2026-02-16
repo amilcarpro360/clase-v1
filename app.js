@@ -1,126 +1,227 @@
 const express = require('express');
 const mongoose = require('mongoose');
-const session = require('cookie-session');
+const cookieParser = require('cookie-parser');
+const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
-const multer = require('multer');
 const webpush = require('web-push');
-
 const app = express();
 
-// ================= CONFIGURACIÓN (PON TUS DATOS AQUÍ) =================
-const MONGO_URI = "mongodb+srv://admin:clase1789@cluster0.jbyog90.mongodb.net/?appName=Cluster0";
+// --- 1. CONFIGURACIÓN CLOUDINARY (Pega tus llaves aquí cuando las tengas) ---
 cloudinary.config({ 
-  cloud_name: 'dvlbsl16g', 
-  api_key: '721617469253873', 
-  api_secret: 'IkWS7Rx0vD8ktW62IdWmlbhNTPk' 
+  cloud_name: 'TU_CLOUD_NAME', 
+  api_key: 'TU_API_KEY', 
+  api_secret: 'TU_API_SECRET' 
 });
 
-// Claves para notificaciones (VAPID)
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: { folder: 'classhub', allowed_formats: ['jpg', 'png', 'pdf', 'mp4'] },
+});
+const upload = multer({ storage: storage });
+
+// --- 2. CONFIGURACIÓN NOTIFICACIONES (VAPID) ---
 const vapidKeys = webpush.generateVAPIDKeys();
-webpush.setVapidDetails('mailto:admin@tuweb.com', vapidKeys.publicKey, vapidKeys.privateKey);
-// ======================================================================
+webpush.setVapidDetails('mailto:tu-email@gmail.com', vapidKeys.publicKey, vapidKeys.privateKey);
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(session({ name: 'session', keys: ['secret2845'], maxAge: 24 * 60 * 60 * 1000 }));
+// --- 3. MODELOS DE DATOS ---
+mongoose.connect('mongodb://localhost:27017/claseDB').then(() => console.log("MongoDB Conectado"));
 
-// MODELOS
-const User = mongoose.model('User', new mongoose.Schema({
+const User = mongoose.model('User', {
     username: String,
-    password: { type: String, required: true },
-    role: { type: String, default: 'user' }, 
-    profilePic: { type: String, default: 'https://via.placeholder.com/150' },
-    isBanned: { type: Boolean, default: false }, // 
-    config: { color: { type: String, default: '#2c3e50' }, splash: { type: String, default: 'Bienvenido' } }
-}));
+    role: { type: String, default: 'user' },
+    photo: { type: String, default: 'https://cdn-icons-png.flaticon.com/512/3135/3135715.png' },
+    themeColor: { type: String, default: '#4A90E2' },
+    pushSubscription: Object,
+    bannedUntil: Date
+});
 
-const Post = mongoose.model('Post', new mongoose.Schema({
-    type: String, title: String, content: String, fileUrl: String, author: String,
-    comments: [{ author: String, text: String, img: String }], // 
+const Post = mongoose.model('Post', {
+    author: String,
+    type: String, // 'apunte', 'duda', 'fecha'
+    content: String,
+    fileUrl: String,
     createdAt: { type: Date, default: Date.now }
-}));
+});
 
-// RESTRICCIÓN FIN DE SEMANA (Punto 6)
-const esFindeRestringido = () => {
-    const ahora = new Date();
-    const dia = ahora.getDay(); 
-    const hora = ahora.getHours();
-    return (dia === 5 && hora >= 18) || dia === 6 || dia === 0 || (dia === 1 && hora < 8); // 
+let globalSplashText = "Bienvenido a ClassHub"; // Configurable por admin
+
+// --- 4. MIDDLEWARES ---
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+app.use(cookieParser());
+
+// Función para regla horaria (Regla 6)
+const canPostDuda = (userPosts) => {
+    const now = new Date();
+    const day = now.getDay();
+    const hour = now.getHours();
+    const isWeekend = (day === 5 && hour >= 18) || day === 6 || day === 0 || (day === 1 && hour < 8);
+    if (!isWeekend) return true;
+    return userPosts.filter(p => p.type === 'duda' && p.createdAt > new Date().setHours(0,0,0,0)).length < 1;
 };
 
-// RUTAS
-app.post('/api/auth/register', async (req, res) => {
-    const { username, password, code } = req.body;
-    const role = (code === "2845") ? 'admin' : 'user'; // 
-    const user = new User({ username, password, role });
-    await user.save();
-    res.json({ success: true });
+// --- 5. RUTAS ---
+
+// Registro y Admin Code
+app.post('/register', async (req, res) => {
+    const { username, code } = req.body;
+    const role = (code === '2845') ? 'admin' : 'user';
+    const user = await User.create({ username, role });
+    res.cookie('userId', user._id).redirect('/');
 });
 
+// Publicar (Apuntes/Dudas) + Cloudinary + Notificación
+app.post('/post', upload.single('archivo'), async (req, res) => {
+    const user = await User.findById(req.cookies.userId);
+    if (!user || (user.bannedUntil && user.bannedUntil > new Date())) return res.send("Baneado.");
+
+    const userPosts = await Post.find({ author: user.username });
+    if (req.body.type === 'duda' && !canPostDuda(userPosts)) {
+        return res.send("<script>alert('Límite de 1 duda en fin de semana'); window.location='/';</script>");
+    }
+
+    await Post.create({
+        author: user.username,
+        type: req.body.type,
+        content: req.body.content,
+        fileUrl: req.file ? req.file.path : ''
+    });
+
+    // Enviar notificación a todos
+    const subs = await User.find({ pushSubscription: { $exists: true } });
+    subs.forEach(s => {
+        webpush.sendNotification(s.pushSubscription, JSON.stringify({ 
+            title: `Nuevo en ${req.body.type}`, 
+            body: `${user.username} ha publicado algo.` 
+        })).catch(() => {});
+    });
+
+    res.redirect('/');
+});
+
+// Suscripción a notificaciones
+app.post('/subscribe', async (req, res) => {
+    const user = await User.findById(req.cookies.userId);
+    if (user) {
+        user.pushSubscription = req.body;
+        await user.save();
+        res.status(201).json({});
+    }
+});
+
+// Service Worker dinámico
 app.get('/sw.js', (req, res) => {
-    res.sendFile(__dirname + '/sw.js');
-});
-
-// FRONTEND INTEGRADO
-app.get('*', async (req, res) => {
-    const adminConf = await User.findOne({ role: 'admin' });
+    res.set('Content-Type', 'application/javascript');
     res.send(`
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Plataforma Escolar</title>
-    <style>
-        :root { --main-color: ${adminConf?.config.color || '#2c3e50'}; }
-        body { font-family: sans-serif; margin: 0; background: #f0f2f5; }
-        nav { background: var(--main-color); color: white; display: flex; justify-content: space-around; padding: 15px; position: sticky; top: 0; }
-        .tab { display: none; padding: 20px; }
-        .active { display: block; }
-        /* FOTO A LA IZQUIERDA (Punto 2.5) */
-        .user-item { display: flex; align-items: center; background: white; padding: 10px; margin: 10px 0; border-radius: 8px; }
-        .user-item img { width: 50px; height: 50px; border-radius: 50%; margin-right: 15px; } 
-        #splash { position: fixed; top:0; width:100%; height:100%; background:white; display:flex; justify-content:center; align-items:center; z-index:1000; }
-    </style>
-</head>
-<body>
-    <div id="splash"><h1>${adminConf?.config.splash || 'Cargando...'}</h1></div>
-
-    <nav>
-        <div onclick="tab('apuntes')">Apuntes</div>
-        <div onclick="tab('fechas')">Fechas</div>
-        <div onclick="showDudas()">Dudas</div>
-        <div onclick="tab('config')">Config</div>
-        <div onclick="tab('admin')">Gestor</div>
-    </nav>
-
-    <div id="apuntes" class="tab active">
-        <h2>Pestaña Apuntes (PDF/Videos/Links)</h2> <input type="file" id="up"> <button onclick="alert('Subiendo...')">Subir</button>
-    </div>
-
-    <div id="admin" class="tab">
-        <h2>Gestor de Usuarios (Admins)</h2>
-        <div id="listaUsuarios">
-            <div class="user-item"><img src="https://via.placeholder.com/50"><span>Usuario Ejemplo (Bannear)</span></div>
-        </div>
-    </div>
-
-    <script>
-        function tab(id) {
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.getElementById(id).classList.add('active');
-        }
-        
-        // Splash (Punto 4)
-        setTimeout(() => document.getElementById('splash').style.display='none', 2000);
-
-        // Registro de Notificaciones Reales (Punto 5)
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js').then(() => console.log("SW Registrado"));
-        }
-    </script>
-</body>
-</html>
+        self.addEventListener('push', e => {
+            const data = e.data.json();
+            self.registration.showNotification(data.title, { body: data.body, icon: 'https://cdn-icons-png.flaticon.com/512/1154/1154047.png' });
+        });
     `);
 });
 
-mongoose.connect(MONGO_URI).then(() => app.listen(process.env.PORT || 3000));
+// --- 6. INTERFAZ HTML INTEGRADA ---
+app.get('/', async (req, res) => {
+    const user = req.cookies.userId ? await User.findById(req.cookies.userId) : null;
+    const posts = await Post.find().sort({ createdAt: -1 });
+    const allUsers = user?.role === 'admin' ? await User.find() : [];
+
+    res.send(`
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <title>ClassHub</title>
+        <style>
+            :root { --main: ${user ? user.themeColor : '#4A90E2'}; }
+            body { font-family: 'Segoe UI', sans-serif; margin: 0; background: #f0f2f5; }
+            #splash { position: fixed; inset: 0; background: var(--main); color: white; display: flex; justify-content: center; align-items: center; z-index: 9000; transition: 1s; font-size: 24px; font-weight: bold; }
+            nav { background: white; padding: 15px; display: flex; justify-content: center; gap: 15px; position: sticky; top: 0; box-shadow: 0 2px 5px rgba(0,0,0,0.1); z-index: 1000; }
+            .tab-btn { border: none; background: none; padding: 10px; cursor: pointer; font-weight: bold; color: #666; }
+            .tab-btn.active { color: var(--main); border-bottom: 3px solid var(--main); }
+            .container { max-width: 600px; margin: 20px auto; padding: 0 10px; }
+            .card { background: white; border-radius: 12px; padding: 15px; margin-bottom: 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+            .user-item { display: flex; align-items: center; gap: 15px; padding: 10px; border-bottom: 1px solid #eee; }
+            .user-item img { width: 50px; height: 50px; border-radius: 50%; object-fit: cover; }
+            .hidden { display: none; }
+            input, textarea { width: 100%; padding: 10px; margin: 5px 0; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }
+            .btn { background: var(--main); color: white; border: none; padding: 10px; border-radius: 8px; width: 100%; cursor: pointer; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        ${!user ? `
+            <div class="container" style="margin-top:100px; text-align:center;">
+                <div class="card">
+                    <h2>Bienvenido</h2>
+                    <form action="/register" method="POST">
+                        <input name="username" placeholder="Tu Nombre" required>
+                        <input name="code" placeholder="Código Admin (opcional)">
+                        <button class="btn">Entrar</button>
+                    </form>
+                </div>
+            </div>
+        ` : `
+            <div id="splash">${globalSplashText}</div>
+            <nav>
+                <button class="tab-btn active" onclick="showTab('apuntes')">Apuntes</button>
+                <button class="tab-btn" onclick="showTab('fechas')">Fechas</button>
+                <button class="tab-btn" onclick="showTab('dudas')">Dudas</button>
+                <button class="tab-btn" onclick="showTab('config')">Config</button>
+                ${user.role === 'admin' ? '<button class="tab-btn" onclick="showTab(\'admin\')">👤 Gestión</button>' : ''}
+            </nav>
+
+            <div class="container">
+                <section id="apuntes" class="tab-content">
+                    <form class="card" action="/post" method="POST" enctype="multipart/form-data">
+                        <input type="hidden" name="type" value="apunte">
+                        <textarea name="content" placeholder="Escribe algo..."></textarea>
+                        <input type="file" name="archivo">
+                        <button class="btn">Subir Apunte</button>
+                    </form>
+                    ${posts.filter(p => p.type === 'apunte').map(p => `<div class="card"><b>${p.author}</b><p>${p.content}</p>${p.fileUrl ? `<img src="${p.fileUrl}" style="width:100%; border-radius:8px;">` : ''}</div>`).join('')}
+                </section>
+
+                <section id="admin" class="tab-content hidden">
+                    <div class="card">
+                        <h3>Gestión de Usuarios</h3>
+                        ${allUsers.map(u => `
+                            <div class="user-item">
+                                <img src="${u.photo}">
+                                <div style="flex:1"><b>${u.username}</b><br><small>${u.role}</small></div>
+                                <button onclick="alert('Baneado')" style="color:red">Ban</button>
+                            </div>
+                        `).join('')}
+                    </div>
+                </section>
+            </div>
+
+            <script>
+                function showTab(id) {
+                    document.querySelectorAll('.tab-content').forEach(s => s.classList.add('hidden'));
+                    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                    document.getElementById(id).classList.remove('hidden');
+                    event.currentTarget.classList.add('active');
+                }
+
+                window.onload = async () => {
+                    setTimeout(() => document.getElementById('splash').style.display = 'none', 1500);
+                    
+                    // Registro de notificaciones
+                    if ('serviceWorker' in navigator) {
+                        const sw = await navigator.serviceWorker.register('/sw.js');
+                        const sub = await sw.pushManager.subscribe({
+                            userVisibleOnly: true,
+                            applicationServerKey: '${vapidKeys.publicKey}'
+                        });
+                        await fetch('/subscribe', { method: 'POST', body: JSON.stringify(sub), headers: {'content-type': 'application/json'} });
+                    }
+                }
+            </script>
+        `}
+    </body>
+    </html>
+    `);
+});
+
+app.listen(3000, () => console.log("Servidor en http://localhost:3000"));
